@@ -383,6 +383,10 @@ class EnhancedStockTrackingAgent(StockTrackingAgent):
             else:
                 logger.info("No stocks sold")
 
+            # Record a fresh equity point first so the switch below sees CURRENT
+            # equity (primary account), not the last dashboard run.
+            await self._snapshot_equity_for_kill()
+
             # Portfolio-level daily-loss / drawdown kill-switch (computed ONCE per
             # cycle — it is account-wide, not per-name). SHADOW-logs unless
             # DAILY_LOSS_KILL_LIVE; when LIVE it blocks EVERY new buy this cycle

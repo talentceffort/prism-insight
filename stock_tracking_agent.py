@@ -240,6 +240,32 @@ class StockTrackingAgent:
         account_key, _ = self._account_scope()
         return await get_current_stock_price(self.cursor, ticker, account_key=account_key)
 
+    async def _snapshot_equity_for_kill(self) -> None:
+        """Record a fresh post-settlement equity point for the ACTIVE account so the
+        daily-loss kill-switch judges on CURRENT equity, not the last dashboard run
+        (otherwise it degrades to a stale multi-day gate — see daily_loss_kill).
+
+        No-op unless the kill-switch is enabled (avoids a KIS balance call when it
+        is off). Fail-open: any error is swallowed, so the kill-switch simply falls
+        back to whatever snapshots already exist (and to allow when there are none).
+        Runs per account each cycle, so multi-account setups all get a fresh point.
+        """
+        try:
+            import daily_loss_kill
+            if not daily_loss_kill.ENABLED:
+                return
+            account_key, account_name = self._account_scope()
+            from trading.domestic_stock_trading import AsyncTradingContext
+            async with AsyncTradingContext(account_name=account_name) as trading:
+                summary = await asyncio.to_thread(trading.get_account_summary)
+            if summary:
+                from tracking.equity_tracker import record_equity_snapshot
+                record_equity_snapshot(
+                    self.conn, account_key, account_name, summary, source="tracking_cycle"
+                )
+        except Exception as e:
+            logger.warning(f"[DAILY_LOSS_KILL] fresh equity snapshot skipped: {e}")
+
     async def _get_trading_value_rank_change(self, ticker: str) -> Tuple[float, str]:
         """Calculate trading value ranking change (delegates to tracking.helpers)"""
         return await get_trading_value_rank_change(ticker)
@@ -1782,6 +1808,10 @@ class StockTrackingAgent:
                         logger.info(f"Sold: {stock['company_name']}({stock['ticker']}) - Return: {stock['profit_rate']:.2f}% / Reason: {stock['reason']}")
                 else:
                     logger.info(f"No stocks sold for {label}")
+
+                # Record a fresh equity point first so the switch below sees CURRENT
+                # equity (this account), not the last dashboard run.
+                await self._snapshot_equity_for_kill()
 
                 # Portfolio daily-loss / drawdown kill-switch — computed ONCE per
                 # account this cycle (account-wide, not per-name). SHADOW-logs

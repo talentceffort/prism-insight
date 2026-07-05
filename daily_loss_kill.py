@@ -17,12 +17,14 @@ under both the root and the prism-us cores-shadowed runtimes, mirroring
 reentry_cooldown.py.
 
 Data source: account_equity_snapshot — one POST-SETTLEMENT equity point per
-account per day (written by the dashboard generator via tracking.equity_tracker;
-fees/tax already netted). Consequences of the daily cadence, by design:
+account per day (fees/tax already netted; written by the dashboard generator and,
+at the start of each buy cycle, by StockTrackingAgent._snapshot_equity_for_kill
+so the switch sees CURRENT equity). Consequences, by design:
   - "drawdown" = highest recorded equity → latest recorded equity (peak-to-now).
-  - "daily drop" = the last COMPLETED day-over-day move (latest vs previous
-    snapshot). At a 09:30 buy run the latest snapshot is the prior session's EOD,
-    so this reads as "did the last closed session hurt us", not intraday-today.
+  - "daily drop" = latest snapshot vs the previous one. With the per-cycle fresh
+    point, "latest" is today's current equity, so this reads as today's drawdown
+    vs the prior session's close. If no fresh point was recorded (kill-switch
+    disabled / balance call failed) it falls back to the last dashboard EOD.
   - Forward-only from the first snapshot; external deposits/withdrawals are NOT
     adjusted for (a deposit looks like a gain) — same caveats as equity_tracker.
 """
