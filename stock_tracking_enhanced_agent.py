@@ -528,50 +528,60 @@ class EnhancedStockTrackingAgent(StockTrackingAgent):
 
                 # Process buy if entry decision
                 if decision == "Enter" and buy_score >= min_score and sector_diverse:
-                    # Process buy (is_add => pyramiding additional independent row, #288)
-                    buy_success = await self.buy_stock(ticker, company_name, current_price, scenario, rank_change_msg, is_add=is_add)
-
-                    if buy_success:
-                        # Call actual account trading function (async)
+                    # Theme A — order-before-record: place the real KIS order FIRST and
+                    # write the holding to the DB ONLY if the order was accepted, so a
+                    # rejected/failed order never leaves a phantom position. Slot/holding
+                    # gates run before the order so we never order what we cannot hold.
+                    buy_success = False
+                    if not await self._can_open_position(ticker, company_name, scenario, is_add):
+                        logger.info(f"{company_name}({ticker}) buy skipped — slot/holding gate")
+                    else:
                         from trading.domestic_stock_trading import AsyncTradingContext
-                        async with AsyncTradingContext() as trading:
-                            # Execute async buy with limit price for reserved orders
-                            trade_result = await trading.async_buy_stock(stock_code=ticker, limit_price=current_price)
+                        try:
+                            async with AsyncTradingContext() as trading:
+                                # Execute async buy with limit price for reserved orders
+                                trade_result = await trading.async_buy_stock(stock_code=ticker, limit_price=current_price)
+                        except Exception as order_err:
+                            logger.error(f"Buy order errored — holding NOT recorded: {order_err}")
+                            trade_result = {"success": False, "message": str(order_err)}
 
                         if trade_result['success']:
                             logger.info(f"Actual purchase successful: {trade_result['message']}")
+                            # Record the holding only now that the order was accepted.
+                            buy_success = await self.buy_stock(ticker, company_name, current_price, scenario, rank_change_msg, is_add=is_add)
+
+                            if buy_success:
+                                # [Optional] Publish buy signal via Redis Streams
+                                # Auto-skipped if Redis not configured (requires UPSTASH_REDIS_REST_URL, UPSTASH_REDIS_REST_TOKEN)
+                                try:
+                                    from messaging.redis_signal_publisher import publish_buy_signal
+                                    await publish_buy_signal(
+                                        ticker=ticker,
+                                        company_name=company_name,
+                                        price=current_price,
+                                        scenario=scenario,
+                                        source="AI Analysis",
+                                        trade_result=trade_result
+                                    )
+                                except Exception as signal_err:
+                                    logger.warning(f"Buy signal publish failed (non-critical): {signal_err}")
+
+                                # [Optional] Publish buy signal via GCP Pub/Sub
+                                # Auto-skipped if GCP not configured (requires GCP_PROJECT_ID, GCP_PUBSUB_TOPIC_ID)
+                                try:
+                                    from messaging.gcp_pubsub_signal_publisher import publish_buy_signal as gcp_publish_buy_signal
+                                    await gcp_publish_buy_signal(
+                                        ticker=ticker,
+                                        company_name=company_name,
+                                        price=current_price,
+                                        scenario=scenario,
+                                        source="AI Analysis",
+                                        trade_result=trade_result
+                                    )
+                                except Exception as signal_err:
+                                    logger.warning(f"GCP buy signal publish failed (non-critical): {signal_err}")
                         else:
-                            logger.error(f"Actual purchase failed: {trade_result['message']}")
-
-                        # [Optional] Publish buy signal via Redis Streams
-                        # Auto-skipped if Redis not configured (requires UPSTASH_REDIS_REST_URL, UPSTASH_REDIS_REST_TOKEN)
-                        try:
-                            from messaging.redis_signal_publisher import publish_buy_signal
-                            await publish_buy_signal(
-                                ticker=ticker,
-                                company_name=company_name,
-                                price=current_price,
-                                scenario=scenario,
-                                source="AI Analysis",
-                                trade_result=trade_result
-                            )
-                        except Exception as signal_err:
-                            logger.warning(f"Buy signal publish failed (non-critical): {signal_err}")
-
-                        # [Optional] Publish buy signal via GCP Pub/Sub
-                        # Auto-skipped if GCP not configured (requires GCP_PROJECT_ID, GCP_PUBSUB_TOPIC_ID)
-                        try:
-                            from messaging.gcp_pubsub_signal_publisher import publish_buy_signal as gcp_publish_buy_signal
-                            await gcp_publish_buy_signal(
-                                ticker=ticker,
-                                company_name=company_name,
-                                price=current_price,
-                                scenario=scenario,
-                                source="AI Analysis",
-                                trade_result=trade_result
-                            )
-                        except Exception as signal_err:
-                            logger.warning(f"GCP buy signal publish failed (non-critical): {signal_err}")
+                            logger.error(f"Actual purchase failed — holding NOT recorded: {trade_result['message']}")
 
                     if buy_success:
                         buy_count += 1
