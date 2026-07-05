@@ -1739,7 +1739,23 @@ class StockTrackingAgent:
             else:
                 message += "- 승률: 0.00%\n"
 
-            message += f"- 누적 수익률: {total_profit:.2f}%\n\n"
+            # Honest account-level return/MDD from the real equity curve
+            # (equity_tracker), shown when >=2 snapshots exist. total_profit is the
+            # arithmetic SUM of per-trade %s — NOT an account return (ignores position
+            # sizing and compounding), so it is demoted to a clearly-labeled reference
+            # line and never presented as "the return". Fail-open to the reference line.
+            try:
+                from tracking.equity_tracker import compute_equity_metrics
+                _eqm = compute_equity_metrics(self.conn, self._account_scope()[0])
+            except Exception:
+                _eqm = {"n_snapshots": 0}
+            if _eqm.get("n_snapshots", 0) >= 2:
+                message += f"- 순자산(평가금) 기준 수익률: {_eqm['return_pct']:.2f}%\n"
+                message += f"- 최대낙폭(MDD): {_eqm['mdd_pct']:.2f}%\n"
+                message += f"- 현재 낙폭: {_eqm['current_drawdown_pct']:.2f}%\n"
+                message += f"- 거래별 수익률 합(참고용): {total_profit:.2f}%\n\n"
+            else:
+                message += f"- 거래별 수익률 합(참고용, 실제 계좌 수익률 아님): {total_profit:.2f}%\n\n"
 
             # 4. Enhanced disclaimer
             message += "📝 주의사항:\n"
