@@ -158,7 +158,10 @@ async def login(force: bool = False) -> dict:
 
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "127.0.0.1", OAUTH_CALLBACK_PORT)
+    # Bind host is configurable so the callback also works inside a container:
+    # Docker forwards the published port to the container's network interface,
+    # which a 127.0.0.1-bound server never receives. Default stays loopback.
+    site = web.TCPSite(runner, os.getenv("OAUTH_CALLBACK_HOST", "127.0.0.1"), OAUTH_CALLBACK_PORT)
 
     try:
         await site.start()
