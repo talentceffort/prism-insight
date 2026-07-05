@@ -1,0 +1,27 @@
+# =============================================================================
+# PRISM-INSIGHT Docker Crontab — PHASE 1 (KR analysis observation only)
+# Timezone: Asia/Seoul (KST)
+#
+# Scope: Korean-stock ANALYSIS + Telegram alerts only. NO trading (no KIS
+# account), NO US module, NO account-dependent dashboard. Use this while
+# observing analysis quality before wiring a brokerage account (Phase 2+).
+# =============================================================================
+
+SHELL=/bin/bash
+PATH=/app/venv/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+PYTHONPATH=/app/prism-insight
+
+# Daily log cleanup at 03:00 KST
+0 3 * * * cd /app/prism-insight && chmod +x utils/cleanup_logs.sh && ./utils/cleanup_logs.sh >> /app/prism-insight/logs/cleanup.log 2>&1
+
+# Stock data update at 07:00 KST (Mon-Fri) — refreshes KR market data for analysis
+0 7 * * 1-5 cd /app/prism-insight && python3 update_stock_data.py >> /app/prism-insight/logs/stock_update_$(date +\%Y\%m\%d).log 2>&1
+
+# KR Morning analysis at 09:30 KST (Mon-Fri)
+30 9 * * 1-5 cd /app/prism-insight && python3 stock_analysis_orchestrator.py --mode morning >> /app/prism-insight/logs/kr_morning_$(date +\%Y\%m\%d).log 2>&1
+
+# KR Afternoon analysis at 15:40 KST (Mon-Fri)
+40 15 * * 1-5 cd /app/prism-insight && python3 stock_analysis_orchestrator.py --mode afternoon >> /app/prism-insight/logs/kr_afternoon_$(date +\%Y\%m\%d).log 2>&1
+
+# =============================================================================
+# Empty line required at the end of crontab file

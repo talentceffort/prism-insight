@@ -1,0 +1,23 @@
+# PRISM-INSIGHT — Phase 1 overlay (KR analysis observation only)
+#
+# Adds to docker-compose.yml:
+#   1. ChatGPT OAuth token mount (so subscription mode works inside the container)
+#   2. Analysis-only crontab swap (no trading / US / account dashboard)
+#
+# Prereq (run on the HOST first, once):
+#   python -m cores.chatgpt_proxy.oauth_login      # writes ~/.config/prism-insight/chatgpt_auth.json
+#
+# Launch:
+#   docker compose -f docker-compose.yml -f docker-compose.phase1.yml config   # verify merge
+#   docker compose -f docker-compose.yml -f docker-compose.phase1.yml up -d --build
+#
+# Move to trading later by dropping this overlay (use docker-compose.yml alone).
+services:
+  prism-insight:
+    volumes:
+      # ChatGPT OAuth token — host login persists into the container.
+      # Image runs as root, so container home is /root.
+      - ${HOME}/.config/prism-insight:/root/.config/prism-insight
+      # Phase-1 crontab: KR analysis only. Same target path as the base mount,
+      # so this override wins in the merged config (verify with `... config`).
+      - ./docker/crontab.phase1:/app/prism-insight/docker/crontab:ro
