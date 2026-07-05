@@ -1821,7 +1821,10 @@ class StockTrackingAgent:
                 _kill_block = False
                 try:
                     from daily_loss_kill import buy_block as _dl_buy_block, LIVE as _DL_KILL_LIVE
-                    _kill = _dl_buy_block(self._account_scope()[0])
+                    # Read the SAME DB the fresh snapshot was written to (self.conn),
+                    # not daily_loss_kill's default/env DB — else a custom-db_path agent
+                    # would judge on the wrong (empty) series and silently no-op.
+                    _kill = _dl_buy_block(self._account_scope()[0], db_path=self.db_path)
                 except Exception:
                     _kill, _DL_KILL_LIVE = None, False
                 if _kill:
