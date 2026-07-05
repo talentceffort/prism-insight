@@ -786,7 +786,7 @@ class StockTrackingAgent:
 
         return True
 
-    async def buy_stock(self, ticker: str, company_name: str, current_price: float, scenario: Dict[str, Any], rank_change_msg: str = "", is_add: bool = False) -> bool:
+    async def buy_stock(self, ticker: str, company_name: str, current_price: float, scenario: Dict[str, Any], rank_change_msg: str = "", is_add: bool = False, validated: bool = False) -> bool:
         """
         Process stock purchase
 
@@ -803,9 +803,11 @@ class StockTrackingAgent:
             bool: Purchase success status
         """
         try:
-            # Gates extracted to _can_open_position (Theme A: process_reports runs
-            # them before ordering; re-checked here to stay safe for direct callers).
-            if not await self._can_open_position(ticker, company_name, scenario, is_add):
+            # Gates run before the order in process_reports (record-on-success). A
+            # direct/unvalidated caller re-checks here; validated=True is the post-order
+            # record-only path and must NOT re-gate — otherwise a filled order is lost
+            # when a concurrent buy took the last slot between the gate and the record.
+            if not validated and not await self._can_open_position(ticker, company_name, scenario, is_add):
                 return False
 
             # Current time
@@ -1823,56 +1825,66 @@ class StockTrackingAgent:
                             _cd_block = _enforce
 
                     if analysis_result.get("decision") == "Enter" and not _cd_block:
-                        buy_success = await self.buy_stock(ticker, company_name, current_price, scenario, rank_change_msg)
-
-                        if buy_success:
+                        # Theme A (P1-1) — order-before-record on the base/CLI path too:
+                        # gate first, place the order, then record (validated=True →
+                        # record-only). A rejected order leaves no phantom holding.
+                        buy_success = False
+                        if not await self._can_open_position(ticker, company_name, scenario, is_add=False):
+                            logger.info(f"{company_name}({ticker}) buy skipped — slot/holding gate")
+                        else:
                             from trading.domestic_stock_trading import AsyncTradingContext
-
-                            async with AsyncTradingContext(account_name=account["name"]) as trading:
-                                trade_result = await trading.async_buy_stock(stock_code=ticker, limit_price=current_price)
+                            try:
+                                async with AsyncTradingContext(account_name=account["name"]) as trading:
+                                    trade_result = await trading.async_buy_stock(stock_code=ticker, limit_price=current_price)
+                            except Exception as order_err:
+                                logger.error(f"Buy order errored — holding NOT recorded: {order_err}")
+                                trade_result = {"success": False, "message": str(order_err)}
 
                             if trade_result['success']:
                                 logger.info(f"Actual purchase successful: {trade_result['message']}")
+
+                                if trade_result.get("partial_success"):
+                                    successful = trade_result.get("successful_accounts", [])
+                                    failed = trade_result.get("failed_accounts", [])
+                                    logger.warning(
+                                        f"{ticker} partial success: {len(successful)}/{len(successful) + len(failed)} accounts"
+                                    )
+
+                                # Record-only now that the order was accepted (validated=True).
+                                buy_success = await self.buy_stock(ticker, company_name, current_price, scenario, rank_change_msg, validated=True)
+
+                                if buy_success and ticker not in signaled_tickers:
+                                    try:
+                                        from messaging.redis_signal_publisher import publish_buy_signal
+
+                                        await publish_buy_signal(
+                                            ticker=ticker,
+                                            company_name=company_name,
+                                            price=current_price,
+                                            scenario=scenario,
+                                            source="AI Analysis",
+                                            trade_result=trade_result
+                                        )
+                                    except Exception as signal_err:
+                                        logger.warning(f"Buy signal publish failed (non-critical): {signal_err}")
+
+                                    try:
+                                        from messaging.gcp_pubsub_signal_publisher import publish_buy_signal as gcp_publish_buy_signal
+
+                                        await gcp_publish_buy_signal(
+                                            ticker=ticker,
+                                            company_name=company_name,
+                                            price=current_price,
+                                            scenario=scenario,
+                                            source="AI Analysis",
+                                            trade_result=trade_result
+                                        )
+                                    except Exception as signal_err:
+                                        logger.warning(f"GCP buy signal publish failed (non-critical): {signal_err}")
+
+                                    signaled_tickers.add(ticker)
                             else:
-                                logger.error(f"Actual purchase failed: {trade_result['message']}")
-
-                            if trade_result.get("partial_success"):
-                                successful = trade_result.get("successful_accounts", [])
-                                failed = trade_result.get("failed_accounts", [])
-                                logger.warning(
-                                    f"{ticker} partial success: {len(successful)}/{len(successful) + len(failed)} accounts"
-                                )
-
-                            if ticker not in signaled_tickers:
-                                try:
-                                    from messaging.redis_signal_publisher import publish_buy_signal
-
-                                    await publish_buy_signal(
-                                        ticker=ticker,
-                                        company_name=company_name,
-                                        price=current_price,
-                                        scenario=scenario,
-                                        source="AI Analysis",
-                                        trade_result=trade_result
-                                    )
-                                except Exception as signal_err:
-                                    logger.warning(f"Buy signal publish failed (non-critical): {signal_err}")
-
-                                try:
-                                    from messaging.gcp_pubsub_signal_publisher import publish_buy_signal as gcp_publish_buy_signal
-
-                                    await gcp_publish_buy_signal(
-                                        ticker=ticker,
-                                        company_name=company_name,
-                                        price=current_price,
-                                        scenario=scenario,
-                                        source="AI Analysis",
-                                        trade_result=trade_result
-                                    )
-                                except Exception as signal_err:
-                                    logger.warning(f"GCP buy signal publish failed (non-critical): {signal_err}")
-
-                                signaled_tickers.add(ticker)
+                                logger.error(f"Actual purchase failed — holding NOT recorded: {trade_result['message']}")
 
                         if buy_success:
                             buy_count += 1

@@ -111,7 +111,7 @@ async def test_process_reports_analyzes_once_and_dedupes_signals(monkeypatch, ca
         sector_checks.append((agent.active_account["name"], sector))
         return True
 
-    async def fake_buy_stock(ticker, company_name, current_price, scenario, rank_change_msg):
+    async def fake_buy_stock(ticker, company_name, current_price, scenario, rank_change_msg, **kwargs):
         buy_calls.append((agent.active_account["name"], ticker))
         return True
 

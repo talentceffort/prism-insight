@@ -538,17 +538,24 @@ class EnhancedStockTrackingAgent(StockTrackingAgent):
                     else:
                         from trading.domestic_stock_trading import AsyncTradingContext
                         try:
+                            # Ensure target/stop are set BEFORE the order — this failable
+                            # prep must not run after a fill; a throw here means no order.
+                            if scenario.get('target_price', 0) <= 0:
+                                scenario['target_price'] = await self._dynamic_target_price(ticker, current_price)
+                            if scenario.get('stop_loss', 0) <= 0:
+                                scenario['stop_loss'] = await self._dynamic_stop_loss(ticker, current_price)
                             async with AsyncTradingContext() as trading:
                                 # Execute async buy with limit price for reserved orders
                                 trade_result = await trading.async_buy_stock(stock_code=ticker, limit_price=current_price)
                         except Exception as order_err:
-                            logger.error(f"Buy order errored — holding NOT recorded: {order_err}")
+                            logger.error(f"Buy prep/order errored — holding NOT recorded: {order_err}")
                             trade_result = {"success": False, "message": str(order_err)}
 
                         if trade_result['success']:
                             logger.info(f"Actual purchase successful: {trade_result['message']}")
-                            # Record the holding only now that the order was accepted.
-                            buy_success = await self.buy_stock(ticker, company_name, current_price, scenario, rank_change_msg, is_add=is_add)
+                            # Record-only now that the order was accepted (validated=True
+                            # → no re-gate, no re-calc; a filled order is never lost).
+                            buy_success = await self.buy_stock(ticker, company_name, current_price, scenario, rank_change_msg, is_add=is_add, validated=True)
 
                             if buy_success:
                                 # [Optional] Publish buy signal via Redis Streams
@@ -597,26 +604,31 @@ class EnhancedStockTrackingAgent(StockTrackingAgent):
             logger.error(traceback.format_exc())
             return 0, 0
 
-    async def buy_stock(self, ticker: str, company_name: str, current_price: float, scenario: Dict[str, Any], rank_change_msg: str = "", is_add: bool = False) -> bool:
+    async def buy_stock(self, ticker: str, company_name: str, current_price: float, scenario: Dict[str, Any], rank_change_msg: str = "", is_add: bool = False, validated: bool = False) -> bool:
         """
         Stock buy processing (override parent class method)
 
         is_add: pyramiding add (#288) — passed through to the parent buy path.
+        validated: True when the caller already ran the gate + level prep and placed
+            the order (record-only path); skip the failable pre-order work here so a
+            filled order is never lost to a post-order gate/calc failure.
         """
         try:
-            # Calculate dynamically if target price/stop-loss is missing or 0 in scenario
-            if scenario.get('target_price', 0) <= 0:
-                target_price = await self._dynamic_target_price(ticker, current_price)
-                scenario['target_price'] = target_price
-                logger.info(f"{ticker} Dynamic target price calculated: {target_price:,.0f} KRW")
+            # Dynamic target/stop is failable pre-order work — skip it on the
+            # record-only path (process_reports ensured levels before the order).
+            if not validated:
+                if scenario.get('target_price', 0) <= 0:
+                    target_price = await self._dynamic_target_price(ticker, current_price)
+                    scenario['target_price'] = target_price
+                    logger.info(f"{ticker} Dynamic target price calculated: {target_price:,.0f} KRW")
 
-            if scenario.get('stop_loss', 0) <= 0:
-                stop_loss = await self._dynamic_stop_loss(ticker, current_price)
-                scenario['stop_loss'] = stop_loss
-                logger.info(f"{ticker} Dynamic stop-loss calculated: {stop_loss:,.0f} KRW")
+                if scenario.get('stop_loss', 0) <= 0:
+                    stop_loss = await self._dynamic_stop_loss(ticker, current_price)
+                    scenario['stop_loss'] = stop_loss
+                    logger.info(f"{ticker} Dynamic stop-loss calculated: {stop_loss:,.0f} KRW")
 
             # Call parent class's buy_stock method
-            return await super().buy_stock(ticker, company_name, current_price, scenario, rank_change_msg, is_add=is_add)
+            return await super().buy_stock(ticker, company_name, current_price, scenario, rank_change_msg, is_add=is_add, validated=validated)
 
         except Exception as e:
             logger.error(f"{ticker} Error during purchase processing: {str(e)}")
