@@ -526,30 +526,62 @@ class EnhancedStockTrackingAgent(StockTrackingAgent):
 
                     continue
 
-                # Re-entry cooldown (churn guard) — parity with base process_reports
-                # (stock_tracking_agent.py). The production batch runs THIS enhanced
-                # agent, which previously had no cooldown, so same-name re-buys right
-                # after a sell were never blocked here. SHADOW-logs unless COOLDOWN_LIVE.
-                # A pyramiding add is not blocked: reentry_block keys on a recent SELL,
-                # and a held (adding) ticker has none.
+                # Re-entry cooldown (churn guard) — parity with base process_reports.
+                # SHADOW-logs unless COOLDOWN_LIVE. Two correctness constraints:
+                #  - Pyramiding adds (#288) are EXEMPT: a fractional sell writes a
+                #    trading_history row while another row of the SAME ticker stays
+                #    open, so a held ticker CAN have a recent sell — blocking a legit
+                #    add on that history is wrong. `is_add` therefore bypasses the gate.
+                #  - Scope the lookup to THIS account so a sell in one account never
+                #    blocks a buy in another (reentry_block filters by account_key).
                 _cd_block = False
-                try:
-                    from reentry_cooldown import reentry_block, COOLDOWN_LIVE, COOLDOWN_RISK_EXIT_LIVE
-                    _cd = reentry_block("KR", ticker)
-                except Exception:
-                    _cd, COOLDOWN_LIVE, COOLDOWN_RISK_EXIT_LIVE = None, False, False
-                if _cd:
-                    _risk_only = bool(_cd.get("risk_exit")) and not _cd.get("after_loss")
-                    _enforce = COOLDOWN_LIVE and (COOLDOWN_RISK_EXIT_LIVE or not _risk_only)
-                    logger.warning(
-                        "[REENTRY_COOLDOWN][%s] %s ticker=%s last_sell=%s ret=%.1f%% gap=%.1fh<%sh after_loss=%s exit_kind=%s risk_only=%s",
-                        "LIVE" if _enforce else "SHADOW", _cd["action"], ticker,
-                        _cd["last_sell"], _cd["last_ret"], _cd["gap_hours"],
-                        _cd["window_hours"], _cd["after_loss"], _cd.get("exit_kind"), _risk_only)
-                    _cd_block = _enforce
+                if not is_add:
+                    try:
+                        _acct_key = self._account_scope()[0]
+                    except Exception:
+                        _acct_key = None
+                    try:
+                        from reentry_cooldown import reentry_block, COOLDOWN_LIVE, COOLDOWN_RISK_EXIT_LIVE
+                        _cd = reentry_block("KR", ticker, account_key=_acct_key)
+                    except Exception:
+                        _cd, COOLDOWN_LIVE, COOLDOWN_RISK_EXIT_LIVE = None, False, False
+                    if _cd:
+                        _risk_only = bool(_cd.get("risk_exit")) and not _cd.get("after_loss")
+                        _enforce = COOLDOWN_LIVE and (COOLDOWN_RISK_EXIT_LIVE or not _risk_only)
+                        logger.warning(
+                            "[REENTRY_COOLDOWN][%s] %s ticker=%s last_sell=%s ret=%.1f%% gap=%.1fh<%sh after_loss=%s exit_kind=%s risk_only=%s",
+                            "LIVE" if _enforce else "SHADOW", _cd["action"], ticker,
+                            _cd["last_sell"], _cd["last_ret"], _cd["gap_hours"],
+                            _cd["window_hours"], _cd["after_loss"], _cd.get("exit_kind"), _risk_only)
+                        _cd_block = _enforce
+
+                # A LIVE-blocked fresh entry is recorded to the watchlist (like the
+                # deferred-buy branch) so it stays traceable on the dashboard/history
+                # instead of silently vanishing from the loop.
+                if _cd_block:
+                    _cd_reason = "재진입 쿨다운 차단 (최근 매도 종목 재매수 방지)"
+                    self._msg_types.append("analysis")
+                    self.message_queue.append(
+                        f"⚠️ 매수 보류: {company_name}({ticker})\n"
+                        f"현재가: {current_price:,.0f}원\n"
+                        f"보류 사유: {_cd_reason}"
+                    )
+                    logger.info(f"Purchase deferred (re-entry cooldown): {company_name}({ticker})")
+                    await self._save_watchlist_item(
+                        ticker=ticker,
+                        company_name=company_name,
+                        current_price=current_price,
+                        buy_score=buy_score,
+                        min_score=min_score,
+                        decision=decision,
+                        skip_reason=_cd_reason,
+                        scenario=scenario,
+                        sector=sector,
+                    )
+                    continue
 
                 # Process buy if entry decision
-                if decision == "Enter" and buy_score >= min_score and sector_diverse and not _cd_block:
+                if decision == "Enter" and buy_score >= min_score and sector_diverse:
                     # Theme A — order-before-record: place the real KIS order FIRST and
                     # write the holding to the DB ONLY if the order was accepted, so a
                     # rejected/failed order never leaves a phantom position. Slot/holding

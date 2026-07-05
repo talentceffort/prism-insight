@@ -1817,11 +1817,20 @@ class StockTrackingAgent:
 
                     # Re-entry cooldown gate (SHADOW logs only; LIVE vetoes a churn
                     # re-entry into a name just sold — longer cooldown after a loss).
+                    # Pyramiding adds (#288) are EXEMPT: a fractional sell writes a
+                    # trading_history row while another row of the SAME ticker stays
+                    # open, so a held ticker CAN have a recent sell; blocking a legit
+                    # add on it is wrong. Scope to this account so a sell in one account
+                    # never blocks a buy in another (reentry_block filters by account_key).
                     _cd_block = False
-                    if analysis_result.get("decision") == "Enter":
+                    if analysis_result.get("decision") == "Enter" and not analysis_result.get("is_add", False):
+                        try:
+                            _acct_key = self._account_scope()[0]
+                        except Exception:
+                            _acct_key = None
                         try:
                             from reentry_cooldown import reentry_block, COOLDOWN_LIVE, COOLDOWN_RISK_EXIT_LIVE
-                            _cd = reentry_block("KR", ticker)
+                            _cd = reentry_block("KR", ticker, account_key=_acct_key)
                         except Exception:
                             _cd, COOLDOWN_LIVE, COOLDOWN_RISK_EXIT_LIVE = None, False, False
                         if _cd:
@@ -1835,6 +1844,10 @@ class StockTrackingAgent:
                                 _cd["last_sell"], _cd["last_ret"], _cd["gap_hours"],
                                 _cd["window_hours"], _cd["after_loss"], _cd.get("exit_kind"), _risk_only)
                             _cd_block = _enforce
+                            if _cd_block:
+                                # Name the reason so the watchlist record (saved below on
+                                # the not-traded path) is specific, not blank.
+                                state["skip_reason"] = "재진입 쿨다운 차단 (최근 매도 종목 재매수 방지)"
 
                     if analysis_result.get("decision") == "Enter" and not _cd_block:
                         # Theme A (P1-1) — order-before-record on the base/CLI path too:
