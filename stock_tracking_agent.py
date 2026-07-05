@@ -1402,18 +1402,23 @@ class StockTrackingAgent:
 
             sold_stocks = []
 
-            # 이벤트 강제청산 자동탐지: 사이클당 1회 KIS 종목상태코드 일괄 prefetch.
-            # (관리종목/투자위험/거래정지 자동 포착 → _analyze_sell_decision의 TIER0.)
+            # 사이클당 1회 KIS 시세 일괄 prefetch (현재가 + 종목상태코드).
+            #  - 현재가: 장중 실시간가(stck_prpr). 매도판단이 일봉 종가(전영업일)로
+            #    stale해져 손절/익절이 하루 늦어지던 문제 보완. 실패 종목은 KRX/DB 폴백.
+            #  - 상태코드: 관리종목/투자위험/거래정지 자동 포착 → _analyze_sell_decision의 TIER0.
             # 실패해도 override 경로는 독립 동작하므로 빈 dict로 안전 폴백.
             kis_status_map: Dict[str, str] = {}
+            kis_price_map: Dict[str, int] = {}
             try:
-                from cores.corporate_status import fetch_status_codes
-                kis_status_map = await fetch_status_codes(
+                from cores.corporate_status import fetch_quotes
+                _quotes = await fetch_quotes(
                     [h.get("ticker") for h in holdings],
                     account_name=holdings[0].get("account_name") if holdings else None,
                 )
+                kis_status_map = {t: q.get("iscd_stat_cls_code", "") for t, q in _quotes.items()}
+                kis_price_map = {t: q.get("current_price", 0) for t, q in _quotes.items()}
             except Exception as e:
-                logger.warning(f"KIS status prefetch skipped: {e}")
+                logger.warning(f"KIS quote prefetch skipped: {e}")
 
             # Pyramiding (#288) FIX 2 — in-pass over-sell guard:
             # When several rows of the SAME ticker sell within one update pass,
@@ -1430,8 +1435,15 @@ class StockTrackingAgent:
                 ticker = stock.get('ticker')
                 company_name = stock.get('company_name')
 
-                # Query current stock price
-                current_price = await self._get_current_stock_price(ticker)
+                # Query current stock price — prefer this cycle's live KIS quote
+                # (real-time intraday, fetched in the prefetch above with no extra
+                # API call). Fall back to the KRX/DB price when KIS missed this
+                # ticker (quote failed / demo-server limitation).
+                current_price = kis_price_map.get(ticker) or 0
+                if current_price > 0:
+                    logger.info(f"{ticker} live KIS price: {current_price:,} KRW")
+                else:
+                    current_price = await self._get_current_stock_price(ticker)
 
                 if current_price <= 0:
                     old_price = stock.get('current_price', 0)

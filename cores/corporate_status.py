@@ -30,6 +30,11 @@ FORCE_EXIT_STAT_CODES = {
     "51": "관리종목",
 }
 
+# KIS 시세조회(inquire-price)는 초당 호출 상한(EGW00215)이 있고 get_current_price는
+# 재시도/백오프가 없다. 보유종목이 많을 때 루프가 상한을 치면 뒤쪽 종목의 실시간가가
+# 통째로 누락(→ 전영업일 종가 폴백)되므로, 호출 사이에 소폭 간격을 둬 버스트를 완화한다.
+_QUOTE_THROTTLE_SEC = 0.15
+
 
 def classify_kis_status(iscd_stat_cls_code: Optional[str]) -> Tuple[bool, str]:
     """KIS 종목상태코드 → (강제청산?, 사유). 코드 없거나 정상이면 (False, '')."""
@@ -67,15 +72,20 @@ def check_event_exit(
     return False, ""
 
 
-async def fetch_status_codes(tickers, account_name: Optional[str] = None) -> dict:
-    """보유종목들의 KIS 종목상태코드(iscd_stat_cls_code)를 일괄 조회.
+async def fetch_quotes(tickers, account_name: Optional[str] = None) -> dict:
+    """보유종목들의 KIS 실시간 시세(현재가 + 상태코드)를 일괄 조회.
 
     KIS 토큰 발급 레이트리밋을 피하려고 **AsyncTradingContext를 1회만** 열고
-    종목별 시세조회(quotation, 계좌 무관)로 상태코드만 수집한다.
+    종목별 시세조회(quotation, 계좌 무관)로 현재가·상태코드를 함께 수집한다.
+    KIS `inquire-price` 응답은 원래 현재가·상태코드를 한 번에 주므로, 상태코드만
+    쓰던 기존 prefetch에 추가 API 호출 없이 실시간 현재가를 얹은 것이다
+    (일봉 종가 기반 폴백은 장중 stale → 손절/익절 판단이 하루 늦어지는 문제 보완).
     어떤 단계가 실패해도(자격증명 없음/네트워크/레이트리밋) 절대 예외를 올리지
-    않고, 가능한 만큼만 채운 dict를 반환한다(자동탐지만 비활성, 매도 본로직은 정상).
+    않고, 가능한 만큼만 채운 dict를 반환한다(실시간가·자동탐지만 부분 비활성,
+    매도 본로직은 KRX/DB 가격으로 정상 폴백).
 
-    Returns: { ticker: "iscd_stat_cls_code" }  (조회 실패 종목은 누락)
+    Returns: { ticker: {"current_price": int, "iscd_stat_cls_code": str} }
+             (조회 실패 종목은 누락)
     """
     import asyncio
 
@@ -86,13 +96,28 @@ async def fetch_status_codes(tickers, account_name: Optional[str] = None) -> dic
     try:
         from trading.domestic_stock_trading import AsyncTradingContext
         async with AsyncTradingContext(account_name=account_name) as trading:
-            for t in uniq:
+            for i, t in enumerate(uniq):
+                if i:  # 첫 호출 제외, 호출 사이에만 간격 (rate-limit 버스트 완화)
+                    await asyncio.sleep(_QUOTE_THROTTLE_SEC)
                 try:
                     info = await asyncio.to_thread(trading.get_current_price, t)
                     if info:
-                        out[t] = str(info.get("iscd_stat_cls_code", "") or "")
+                        out[t] = {
+                            "current_price": int(info.get("current_price", 0) or 0),
+                            "iscd_stat_cls_code": str(info.get("iscd_stat_cls_code", "") or ""),
+                        }
                 except Exception as e:  # 개별 종목 실패는 건너뜀
-                    logger.warning(f"{t} KIS 상태코드 조회 실패: {e}")
+                    logger.warning(f"{t} KIS 시세 조회 실패: {e}")
     except Exception as e:  # 컨텍스트/자격증명 실패 → 전체 스킵(안전)
-        logger.warning(f"KIS 상태코드 prefetch 스킵: {e}")
+        logger.warning(f"KIS 시세 prefetch 스킵: {e}")
     return out
+
+
+async def fetch_status_codes(tickers, account_name: Optional[str] = None) -> dict:
+    """보유종목들의 KIS 종목상태코드(iscd_stat_cls_code)를 일괄 조회.
+
+    fetch_quotes의 상태코드 프로젝션(단일 KIS 호출 루프 공유). 반환 계약
+    { ticker: "iscd_stat_cls_code" } (조회 실패 종목 누락)를 그대로 유지한다.
+    """
+    quotes = await fetch_quotes(tickers, account_name=account_name)
+    return {t: q.get("iscd_stat_cls_code", "") for t, q in quotes.items()}

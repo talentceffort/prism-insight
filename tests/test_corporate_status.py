@@ -96,3 +96,22 @@ def test_fetch_then_classify_integration(monkeypatch):
     out = asyncio.run(cs.fetch_status_codes(["000660"]))
     ok, reason = cs.check_event_exit("000660", kis_status_code=out.get("000660"), market="KR")
     assert ok is True and "KIS_STATUS" in reason
+
+
+# ── fetch_quotes (현재가 + 상태코드 통합 prefetch) ─────────────────
+def test_fetch_quotes_returns_price_and_status(monkeypatch):
+    _install_fake_trading(monkeypatch, {"012510": "57", "000660": "51"})
+    out = asyncio.run(cs.fetch_quotes(["012510", "000660", "  ", ""]))
+    assert set(out) == {"012510", "000660"}
+    assert out["012510"]["current_price"] == 1  # _FakeTrader returns 1
+    assert out["012510"]["iscd_stat_cls_code"] == "57"
+    assert out["000660"]["iscd_stat_cls_code"] == "51"
+    # projection parity: fetch_status_codes must still yield the bare code map
+    codes = asyncio.run(cs.fetch_status_codes(["012510", "000660"]))
+    assert codes == {"012510": "57", "000660": "51"}
+
+
+def test_fetch_quotes_context_failure_safe(monkeypatch):
+    _install_fake_trading(monkeypatch, boom=True)
+    assert asyncio.run(cs.fetch_quotes(["012510"])) == {}
+    assert asyncio.run(cs.fetch_quotes([])) == {}
