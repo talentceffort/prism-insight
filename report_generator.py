@@ -17,9 +17,35 @@ from mcp_agent.agents.agent import Agent
 from mcp_agent.app import MCPApp
 from mcp_agent.workflows.llm.augmented_llm import RequestParams
 from mcp_agent.workflows.llm.augmented_llm_anthropic import AnthropicAugmentedLLM
+from mcp_agent.workflows.llm.augmented_llm_openai import OpenAIAugmentedLLM
 
 # Logger setup
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Report-generation LLM provider — switchable without code changes.
+#   PRISM_REPORT_LLM   = "anthropic" (default) | "openai"
+#   PRISM_REPORT_MODEL = optional model-string override for that provider
+# "openai" routes through the ChatGPT OAuth proxy when
+# PRISM_OPENAI_AUTH_MODE=chatgpt_oauth, so reports run on a ChatGPT subscription.
+# Set PRISM_REPORT_LLM=anthropic (or unset it) to revert to Claude at any time.
+# ---------------------------------------------------------------------------
+_REPORT_LLM_DEFAULT_MODEL = {"anthropic": "claude-sonnet-5", "openai": "gpt-5"}
+
+
+def _report_llm_provider() -> str:
+    provider = os.getenv("PRISM_REPORT_LLM", "anthropic").strip().lower()
+    return provider if provider in _REPORT_LLM_DEFAULT_MODEL else "anthropic"
+
+
+def _report_llm_class():
+    """Augmented-LLM class for report generation, per PRISM_REPORT_LLM."""
+    return OpenAIAugmentedLLM if _report_llm_provider() == "openai" else AnthropicAugmentedLLM
+
+
+def _report_model() -> str:
+    """Model string for report generation (env override: PRISM_REPORT_MODEL)."""
+    return os.getenv("PRISM_REPORT_MODEL") or _REPORT_LLM_DEFAULT_MODEL[_report_llm_provider()]
 
 # ============================================================================
 # Global MCPApp management (prevent process accumulation)
@@ -731,7 +757,7 @@ async def generate_follow_up_response(ticker, ticker_name, conversation_context,
         )
 
         # LLM 연결
-        llm = await agent.attach_llm(AnthropicAugmentedLLM)
+        llm = await agent.attach_llm(_report_llm_class())
 
         # 응답 생성
         response = await llm.generate_str(
@@ -741,7 +767,7 @@ async def generate_follow_up_response(ticker, ticker_name, conversation_context,
                     필요한 경우 최신 데이터를 조회하여 정확한 정보를 제공하세요.
                     """,
             request_params=RequestParams(
-                model="claude-sonnet-5",
+                model=_report_model(),
                 maxTokens=4000
             )
         )
@@ -922,7 +948,7 @@ async def generate_evaluation_response(ticker, ticker_name, avg_price, period, t
         )
 
         # LLM 연결
-        llm = await agent.attach_llm(AnthropicAugmentedLLM)
+        llm = await agent.attach_llm(_report_llm_class())
 
         # 보고서 내용 확인
         report_content = ""
@@ -938,7 +964,7 @@ async def generate_evaluation_response(ticker, ticker_name, avg_price, period, t
                     {report_content if report_content else "관련 보고서가 없습니다. 시장 데이터 조회와 perplexity 검색을 통해 최신 정보를 수집하여 평가해주세요."}
                     """,
             request_params=RequestParams(
-                model="claude-sonnet-5",
+                model=_report_model(),
                 maxTokens=8000
             )
         )
@@ -1125,7 +1151,7 @@ async def generate_us_evaluation_response(ticker, ticker_name, avg_price, period
         )
 
         # LLM 연결
-        llm = await agent.attach_llm(AnthropicAugmentedLLM)
+        llm = await agent.attach_llm(_report_llm_class())
 
         # 응답 생성
         response = await llm.generate_str(
@@ -1135,7 +1161,7 @@ async def generate_us_evaluation_response(ticker, ticker_name, avg_price, period
                     perplexity로 최신 뉴스와 시장 동향을 검색한 후 종합적인 평가를 제공해주세요.
                     """,
             request_params=RequestParams(
-                model="claude-sonnet-5",
+                model=_report_model(),
                 maxTokens=8000
             )
         )
@@ -1222,7 +1248,7 @@ async def generate_us_follow_up_response(ticker, ticker_name, conversation_conte
         )
 
         # Connect to LLM
-        llm = await agent.attach_llm(AnthropicAugmentedLLM)
+        llm = await agent.attach_llm(_report_llm_class())
 
         # Generate response
         response = await llm.generate_str(
@@ -1232,7 +1258,7 @@ async def generate_us_follow_up_response(ticker, ticker_name, conversation_conte
                     필요한 경우 yahoo_finance를 통해 최신 데이터를 조회하여 정확한 정보를 제공하세요.
                     """,
             request_params=RequestParams(
-                model="claude-sonnet-5",
+                model=_report_model(),
                 maxTokens=4000
             )
         )
@@ -1342,7 +1368,7 @@ async def generate_journal_conversation_response(
         )
 
         # Connect to LLM
-        llm = await agent.attach_llm(AnthropicAugmentedLLM)
+        llm = await agent.attach_llm(_report_llm_class())
 
         # Generate response
         response = await llm.generate_str(
@@ -1350,7 +1376,7 @@ async def generate_journal_conversation_response(
 
 위 메시지에 자연스럽게 응답해주세요. 사용자의 과거 기록(저널, 평가 등)을 참고하여 개인화된 답변을 제공하세요.""",
             request_params=RequestParams(
-                model="claude-sonnet-5",
+                model=_report_model(),
                 maxTokens=4000
             )
         )
@@ -1434,12 +1460,12 @@ async def generate_firecrawl_search_response(search_query: str, analysis_prompt:
             server_names=[]
         )
 
-        llm = await agent.attach_llm(AnthropicAugmentedLLM)
+        llm = await agent.attach_llm(_report_llm_class())
 
         response = await llm.generate_str(
             message=f"다음은 웹 검색 결과입니다:\n\n{context}\n\n---\n\n{analysis_prompt}",
             request_params=RequestParams(
-                model="claude-sonnet-5",
+                model=_report_model(),
                 maxTokens=4000
             )
         )
@@ -1542,11 +1568,11 @@ async def generate_firecrawl_followup_response(
             server_names=server_names,
         )
 
-        llm = await agent.attach_llm(AnthropicAugmentedLLM)
+        llm = await agent.attach_llm(_report_llm_class())
         response = await llm.generate_str(
             message=user_question,
             request_params=RequestParams(
-                model="claude-sonnet-5",
+                model=_report_model(),
                 maxTokens=4000,
             ),
         )
