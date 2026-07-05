@@ -1783,6 +1783,24 @@ class StockTrackingAgent:
                 else:
                     logger.info(f"No stocks sold for {label}")
 
+                # Portfolio daily-loss / drawdown kill-switch — computed ONCE per
+                # account this cycle (account-wide, not per-name). SHADOW-logs
+                # unless DAILY_LOSS_KILL_LIVE; when LIVE it blocks EVERY new buy for
+                # this account this cycle (never sells). Fail-open: error → no block.
+                _kill = None
+                _kill_block = False
+                try:
+                    from daily_loss_kill import buy_block as _dl_buy_block, LIVE as _DL_KILL_LIVE
+                    _kill = _dl_buy_block(self._account_scope()[0])
+                except Exception:
+                    _kill, _DL_KILL_LIVE = None, False
+                if _kill:
+                    logger.warning(
+                        "[DAILY_LOSS_KILL][%s] %s dd=%.1f%% daily=%.1f%% peak=%s latest=%s",
+                        "LIVE" if _DL_KILL_LIVE else "SHADOW", _kill["reason"],
+                        _kill["drawdown_pct"], _kill["daily_drop_pct"], _kill["peak"], _kill["latest"])
+                    _kill_block = _DL_KILL_LIVE
+
                 for state in analysis_states:
                     analysis_result = state["analysis"]
                     ticker = analysis_result.get("ticker")
@@ -1849,7 +1867,13 @@ class StockTrackingAgent:
                                 # the not-traded path) is specific, not blank.
                                 state["skip_reason"] = "재진입 쿨다운 차단 (최근 매도 종목 재매수 방지)"
 
-                    if analysis_result.get("decision") == "Enter" and not _cd_block:
+                    # Portfolio kill-switch (verdict computed once per account above)
+                    # blocks all new buys this cycle; name the reason so the watchlist
+                    # record (not-traded path) is specific.
+                    if _kill_block:
+                        state["skip_reason"] = f"일일손실/드로다운 킬스위치 ({_kill['reason']})"
+
+                    if analysis_result.get("decision") == "Enter" and not _cd_block and not _kill_block:
                         # Theme A (P1-1) — order-before-record on the base/CLI path too:
                         # gate first, place the order, then record (validated=True →
                         # record-only). A rejected order leaves no phantom holding.

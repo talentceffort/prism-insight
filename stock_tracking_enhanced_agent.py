@@ -383,6 +383,24 @@ class EnhancedStockTrackingAgent(StockTrackingAgent):
             else:
                 logger.info("No stocks sold")
 
+            # Portfolio-level daily-loss / drawdown kill-switch (computed ONCE per
+            # cycle — it is account-wide, not per-name). SHADOW-logs unless
+            # DAILY_LOSS_KILL_LIVE; when LIVE it blocks EVERY new buy this cycle
+            # (never sells). Fail-open: any error → no block.
+            _kill = None
+            _kill_block = False
+            try:
+                from daily_loss_kill import buy_block as _dl_buy_block, LIVE as _DL_KILL_LIVE
+                _kill = _dl_buy_block(self._account_scope()[0])
+            except Exception:
+                _kill, _DL_KILL_LIVE = None, False
+            if _kill:
+                logger.warning(
+                    "[DAILY_LOSS_KILL][%s] %s dd=%.1f%% daily=%.1f%% peak=%s latest=%s",
+                    "LIVE" if _DL_KILL_LIVE else "SHADOW", _kill["reason"],
+                    _kill["drawdown_pct"], _kill["daily_drop_pct"], _kill["peak"], _kill["latest"])
+                _kill_block = _DL_KILL_LIVE
+
             # 2. Analyze new reports and make buy decisions
             for pdf_report_path in pdf_report_paths:
                 # Analyze report
@@ -524,6 +542,31 @@ class EnhancedStockTrackingAgent(StockTrackingAgent):
                         sector=sector
                     )
 
+                    continue
+
+                # Portfolio-level kill-switch (verdict computed once above) blocks
+                # EVERY new buy this cycle. Record each blocked Enter to the
+                # watchlist so it stays traceable, then skip.
+                if _kill_block:
+                    _k_reason = f"일일손실/드로다운 킬스위치 ({_kill['reason']})"
+                    self._msg_types.append("analysis")
+                    self.message_queue.append(
+                        f"⚠️ 매수 보류: {company_name}({ticker})\n"
+                        f"현재가: {current_price:,.0f}원\n"
+                        f"보류 사유: {_k_reason}"
+                    )
+                    logger.info(f"Purchase blocked (daily-loss kill-switch): {company_name}({ticker})")
+                    await self._save_watchlist_item(
+                        ticker=ticker,
+                        company_name=company_name,
+                        current_price=current_price,
+                        buy_score=buy_score,
+                        min_score=min_score,
+                        decision=decision,
+                        skip_reason=_k_reason,
+                        scenario=scenario,
+                        sector=sector,
+                    )
                     continue
 
                 # Re-entry cooldown (churn guard) — parity with base process_reports.
