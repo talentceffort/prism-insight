@@ -526,8 +526,30 @@ class EnhancedStockTrackingAgent(StockTrackingAgent):
 
                     continue
 
+                # Re-entry cooldown (churn guard) — parity with base process_reports
+                # (stock_tracking_agent.py). The production batch runs THIS enhanced
+                # agent, which previously had no cooldown, so same-name re-buys right
+                # after a sell were never blocked here. SHADOW-logs unless COOLDOWN_LIVE.
+                # A pyramiding add is not blocked: reentry_block keys on a recent SELL,
+                # and a held (adding) ticker has none.
+                _cd_block = False
+                try:
+                    from reentry_cooldown import reentry_block, COOLDOWN_LIVE, COOLDOWN_RISK_EXIT_LIVE
+                    _cd = reentry_block("KR", ticker)
+                except Exception:
+                    _cd, COOLDOWN_LIVE, COOLDOWN_RISK_EXIT_LIVE = None, False, False
+                if _cd:
+                    _risk_only = bool(_cd.get("risk_exit")) and not _cd.get("after_loss")
+                    _enforce = COOLDOWN_LIVE and (COOLDOWN_RISK_EXIT_LIVE or not _risk_only)
+                    logger.warning(
+                        "[REENTRY_COOLDOWN][%s] %s ticker=%s last_sell=%s ret=%.1f%% gap=%.1fh<%sh after_loss=%s exit_kind=%s risk_only=%s",
+                        "LIVE" if _enforce else "SHADOW", _cd["action"], ticker,
+                        _cd["last_sell"], _cd["last_ret"], _cd["gap_hours"],
+                        _cd["window_hours"], _cd["after_loss"], _cd.get("exit_kind"), _risk_only)
+                    _cd_block = _enforce
+
                 # Process buy if entry decision
-                if decision == "Enter" and buy_score >= min_score and sector_diverse:
+                if decision == "Enter" and buy_score >= min_score and sector_diverse and not _cd_block:
                     # Theme A — order-before-record: place the real KIS order FIRST and
                     # write the holding to the DB ONLY if the order was accepted, so a
                     # rejected/failed order never leaves a phantom position. Slot/holding
