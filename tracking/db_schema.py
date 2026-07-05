@@ -265,6 +265,29 @@ CREATE TABLE IF NOT EXISTS user_preferences (
 )
 """
 
+# Table: account_equity_snapshot (real KIS account equity time series)
+# total_eval_amount is KIS's post-settlement figure (fees + transaction tax
+# already deducted), so return/MDD derived from this curve are net of costs.
+# UNIQUE(account_key, snapshot_date) keeps one point per account per day; a
+# second same-day run upserts (last write wins ~ EOD) so intraday runs don't
+# distort MDD. External deposits/withdrawals are NOT adjusted for.
+TABLE_ACCOUNT_EQUITY_SNAPSHOT = """
+CREATE TABLE IF NOT EXISTS account_equity_snapshot (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_key TEXT NOT NULL,
+    account_name TEXT,
+    ts TEXT NOT NULL,                    -- ISO8601 snapshot time (local)
+    snapshot_date TEXT NOT NULL,         -- date(ts); one point per account per day
+    total_eval_amount REAL NOT NULL,     -- net equity after settlement
+    securities_value REAL,               -- holdings value (total_eval - total_cash)
+    total_cash REAL,                     -- deposit + D+2 receivables
+    deposit REAL,                        -- deposit (D+0)
+    unrealized_pnl REAL,                 -- unrealized P&L on holdings
+    source TEXT,                         -- 'dashboard' | 'tracking_cycle' | 'manual'
+    UNIQUE(account_key, snapshot_date)
+)
+"""
+
 # Indexes
 INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_stock_holdings_account_key ON stock_holdings(account_key)",
@@ -291,6 +314,7 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_memories_type ON user_memories(user_id, memory_type)",
     "CREATE INDEX IF NOT EXISTS idx_memories_ticker ON user_memories(user_id, ticker)",
     "CREATE INDEX IF NOT EXISTS idx_memories_created ON user_memories(user_id, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_equity_snapshot_account ON account_equity_snapshot(account_key, ts)",
 ]
 
 
@@ -780,6 +804,7 @@ def create_all_tables(cursor, conn):
         TABLE_USER_MEMORIES,
         TABLE_USER_PREFERENCES,
         TABLE_PORTFOLIO_ADJUSTMENT_LOG,
+        TABLE_ACCOUNT_EQUITY_SNAPSHOT,
     ]
 
     for table_sql in tables:

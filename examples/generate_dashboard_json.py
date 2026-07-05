@@ -112,7 +112,7 @@ class DashboardDataGenerator:
         """한국투자증권 API로부터 실전투자 데이터 가져오기"""
         if not KIS_AVAILABLE:
             logger.warning("한국투자증권 API를 사용할 수 없습니다.")
-            return {"portfolio": [], "account_summary": {}}
+            return {"portfolio": [], "account_summary": {}, "account_performance": {}}
         
         try:
             logger.info(f"한국투자증권 데이터 조회 중... (모드: {self.trading_mode})")
@@ -125,7 +125,31 @@ class DashboardDataGenerator:
             # 계좌 요약 데이터 조회
             account_summary = trader.get_account_summary()
             logger.info("계좌 요약 조회 완료")
-            
+
+            # Record a real-account equity point and derive honest return/MDD.
+            # total_eval_amount is post-settlement (fees/tax already netted).
+            # account_key/name follow the shared schema convention (prod:acct:prod)
+            # so this table aligns with holdings/history. Isolated so a snapshot
+            # failure never breaks dashboard generation.
+            account_performance = {}
+            try:
+                from tracking.equity_tracker import (
+                    record_equity_snapshot, compute_equity_metrics,
+                )
+                account_key = getattr(trader, "account_key", None) or self.trading_mode
+                account_name = getattr(trader, "account_name", None) or self.trading_mode
+                eq_conn = self.connect_db()
+                try:
+                    record_equity_snapshot(
+                        eq_conn, account_key, account_name, account_summary,
+                        source="dashboard",
+                    )
+                    account_performance = compute_equity_metrics(eq_conn, account_key)
+                finally:
+                    eq_conn.close()
+            except Exception as e:
+                logger.warning(f"계좌 equity 스냅샷/지표 계산 실패(무시): {e}")
+
             # 데이터 변환 (dashboard 형식에 맞게)
             formatted_portfolio = []
             for stock in portfolio:
@@ -151,12 +175,13 @@ class DashboardDataGenerator:
             
             return {
                 "portfolio": formatted_portfolio,
-                "account_summary": account_summary
+                "account_summary": account_summary,
+                "account_performance": account_performance
             }
             
         except Exception as e:
             logger.error(f"한국투자증권 데이터 조회 중 오류: {str(e)}")
-            return {"portfolio": [], "account_summary": {}}
+            return {"portfolio": [], "account_summary": {}, "account_performance": {}}
         
     def connect_db(self):
         """DB 연결"""
@@ -1461,6 +1486,7 @@ class DashboardDataGenerator:
             kis_data = self.get_kis_trading_data()
             real_portfolio = kis_data.get("portfolio", [])
             account_summary = kis_data.get("account_summary", {})
+            account_performance = kis_data.get("account_performance", {})
             
             # 전인구 실험실 데이터 수집
             jeoningu_lab = self.get_jeoningu_data(conn)
@@ -1502,6 +1528,7 @@ class DashboardDataGenerator:
                 'holdings': holdings,
                 'real_portfolio': real_portfolio,  # 실전투자 포트폴리오 추가
                 'account_summary': account_summary,  # 계좌 요약 추가
+                'account_performance': account_performance,  # 정직한 계좌 수익률/MDD (equity 시계열 기반)
                 'operating_costs': self.get_operating_costs(),  # 운영 비용 추가
                 'trading_history': trading_history,
                 'watchlist': watchlist,
