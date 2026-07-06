@@ -185,6 +185,7 @@ def backtest(prices: dict[str, pd.DataFrame], p: dict) -> list[dict]:
             trades.append(dict(
                 ticker=c, entry_date=date_str[i], exit_date=date_str[j],
                 reason=reason, net_pct=sb.net_trade_return_pct(entry, exit_px),
+                entry_price=round(entry, 4),
                 ret5=round(r5 * 100, 2), ext=round((c1 / mt - 1) * 100, 2),
                 depth=round(depth, 2), chg1=round(ch, 2), rank=int(rk),
                 from_high=round((c1 / h20v - 1) * 100, 2) if pd.notna(h20v) else None,
@@ -323,6 +324,83 @@ def filter_sweep(prices: dict[str, pd.DataFrame], base_p: dict, split_date: str)
     print("  (goal: OOS avg up, OOS worst less negative, n not decimated vs no-filter row)")
 
 
+def portfolio_equity(trades: list[dict], prices: dict[str, pd.DataFrame],
+                     split_date: str, capital: int = 10_000_000, slots: int = 10) -> None:
+    """Event-driven N-slot portfolio sim over the trade list. Fixed per-slot notional
+    (non-compounding, matches the sim design): equity = capital + realized + unrealized.
+    Translates the per-trade edge into a real portfolio return/MDD and shows whether the
+    fat-tail losses cluster on the same days (correlated crashes). When more signals fire
+    than free slots, the most-liquid (lowest 거래대금 rank) are taken first; the rest are
+    skipped and counted — a high skip count means the curve harvests only a slot-limited
+    slice of the per-trade edge."""
+    per_slot = capital / slots
+    close = pd.DataFrame({c: d["Close"] for c, d in prices.items()}).sort_index()
+    dates = [str(x)[:10] for x in close.index]
+    by_entry: dict[str, list] = {}
+    for t in trades:
+        by_entry.setdefault(t["entry_date"], []).append(t)
+
+    realized = 0.0
+    open_pos: list[dict] = []
+    eq_dates, eq_vals = [], []
+    daily_real: dict[str, tuple] = {}          # date -> (realized_pnl, n_closed)
+    skipped = admitted = same_day = max_conc = 0
+
+    def _close(d, pnl):
+        nonlocal realized
+        realized += pnl
+        p, n = daily_real.get(d, (0.0, 0))
+        daily_real[d] = (p + pnl, n + 1)
+
+    for i, d in enumerate(dates):
+        ts = close.index[i]
+        keep = []                                                    # exits free slots
+        for pos in open_pos:
+            if pos["exit_date"] == d:
+                _close(d, per_slot * pos["net_pct"] / 100.0)
+            else:
+                keep.append(pos)
+        open_pos = keep
+        free = slots - len(open_pos)
+        for t in sorted(by_entry.get(d, []), key=lambda x: x.get("rank") or 99999):
+            if t["exit_date"] == d:                                  # same-day knife: realize now
+                _close(d, per_slot * t["net_pct"] / 100.0); same_day += 1; admitted += 1
+            elif free > 0:
+                open_pos.append(dict(ticker=t["ticker"], entry_px=t["entry_price"],
+                                     exit_date=t["exit_date"], net_pct=t["net_pct"]))
+                free -= 1; admitted += 1
+            else:
+                skipped += 1
+        max_conc = max(max_conc, len(open_pos))
+        unreal = sum(per_slot * (close.at[ts, pos["ticker"]] / pos["entry_px"] - 1.0)
+                     for pos in open_pos
+                     if pos["entry_px"] and pd.notna(close.at[ts, pos["ticker"]]))
+        eq_dates.append(d); eq_vals.append(capital + realized + unreal)
+
+    eq = pd.Series(eq_vals, index=eq_dates)
+    peak = eq.cummax(); mdd = ((eq - peak) / peak * 100.0).min()
+    ret = (eq.iloc[-1] / capital - 1) * 100.0
+    ann = ((eq.iloc[-1] / capital) ** (252.0 / len(eq)) - 1) * 100.0 if len(eq) else 0.0
+    in_dates = [x for x in eq.index if x <= split_date]
+    eq_split = eq.loc[in_dates[-1]] if in_dates else capital
+    ret_in = (eq_split / capital - 1) * 100.0
+    ret_oos = (eq.iloc[-1] / eq_split - 1) * 100.0 if eq_split else 0.0
+    worst = sorted(daily_real.items(), key=lambda kv: kv[1][0])[:5]
+
+    print(f"\n=== {slots}-SLOT PORTFOLIO EQUITY (capital {capital:,}, {per_slot:,.0f}/slot) ===")
+    print(f"  period {eq.index[0]} ~ {eq.index[-1]} ({len(eq)} trading days)")
+    print(f"  signals: {admitted} admitted ({same_day} same-day) / {skipped} skipped (slots full)"
+          f" / max concurrent {max_conc}/{slots}")
+    print(f"  total return {ret:+.1f}%   annualized {ann:+.1f}%   real MDD {mdd:.1f}%")
+    print(f"  in-sample {ret_in:+.1f}%   |   OOS {ret_oos:+.1f}%   (split @ {split_date})")
+    print(f"  worst days (clustering check — realized KRW, #closed):")
+    for dt, (pnl, n) in worst:
+        print(f"    {dt}  {pnl:>+12,.0f}  ({n} closed)")
+    if skipped > admitted:
+        print(f"  ⚠ skipped ({skipped}) > admitted ({admitted}): heavily slot-constrained — "
+              f"curve reflects a liquidity-ranked subset, not the full per-trade edge.")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--start", default="2025-01-01")
@@ -330,6 +408,7 @@ def main():
     ap.add_argument("--universe-top", type=int, default=DEFAULTS["universe_top"])
     ap.add_argument("--sweep", action="store_true", help="exit-geometry sweep with OOS split")
     ap.add_argument("--filter-sweep", action="store_true", help="entry-quality filter sweep (OOS)")
+    ap.add_argument("--equity", action="store_true", help="10-slot portfolio equity (v2 candidate)")
     ap.add_argument("--split", default="2026-01-31", help="in-sample/OOS entry-date boundary")
     a = ap.parse_args()
     p = dict(DEFAULTS, universe_top=a.universe_top)
@@ -348,6 +427,11 @@ def main():
     if a.filter_sweep:
         print(f"[3/3] entry-quality filter sweep (exit geometry fixed) ...")
         filter_sweep(prices, p, a.split)
+        return
+    if a.equity:
+        v2 = dict(p, chg1_min=0.0, depth_min=1.0, stop_pct=3.0, target_pct=None, hold_days=10)
+        print(f"[3/3] 10-slot equity — v2 candidate (chg1>=0, depth>=1, stop3, no-target, hold10) ...")
+        portfolio_equity(backtest(prices, v2), prices, a.split)
         return
 
     print(f"[3/3] backtest (v1: support MA{p['support_ma']}, stop -{p['stop_pct']}%, "
