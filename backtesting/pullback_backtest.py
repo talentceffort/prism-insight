@@ -324,8 +324,8 @@ def filter_sweep(prices: dict[str, pd.DataFrame], base_p: dict, split_date: str)
     print("  (goal: OOS avg up, OOS worst less negative, n not decimated vs no-filter row)")
 
 
-def portfolio_equity(trades: list[dict], prices: dict[str, pd.DataFrame],
-                     split_date: str, capital: int = 10_000_000, slots: int = 10) -> None:
+def portfolio_equity(trades: list[dict], prices: dict[str, pd.DataFrame], split_date: str,
+                     capital: int = 10_000_000, slots: int = 10, verbose: bool = True) -> dict:
     """Event-driven N-slot portfolio sim over the trade list. Fixed per-slot notional
     (non-compounding, matches the sim design): equity = capital + realized + unrealized.
     Translates the per-trade edge into a real portfolio return/MDD and shows whether the
@@ -385,20 +385,56 @@ def portfolio_equity(trades: list[dict], prices: dict[str, pd.DataFrame],
     eq_split = eq.loc[in_dates[-1]] if in_dates else capital
     ret_in = (eq_split / capital - 1) * 100.0
     ret_oos = (eq.iloc[-1] / eq_split - 1) * 100.0 if eq_split else 0.0
-    worst = sorted(daily_real.items(), key=lambda kv: kv[1][0])[:5]
+    m = dict(ret=ret, ann=ann, mdd=mdd, ret_in=ret_in, ret_oos=ret_oos, days=len(eq),
+             admitted=admitted, skipped=skipped, same_day=same_day, max_conc=max_conc,
+             start=eq.index[0], end=eq.index[-1],
+             worst=sorted(daily_real.items(), key=lambda kv: kv[1][0])[:5])
+    if verbose:
+        _print_equity(m, capital, per_slot, slots, split_date)
+    return m
 
+
+def _print_equity(m: dict, capital: int, per_slot: float, slots: int, split_date: str) -> None:
     print(f"\n=== {slots}-SLOT PORTFOLIO EQUITY (capital {capital:,}, {per_slot:,.0f}/slot) ===")
-    print(f"  period {eq.index[0]} ~ {eq.index[-1]} ({len(eq)} trading days)")
-    print(f"  signals: {admitted} admitted ({same_day} same-day) / {skipped} skipped (slots full)"
-          f" / max concurrent {max_conc}/{slots}")
-    print(f"  total return {ret:+.1f}%   annualized {ann:+.1f}%   real MDD {mdd:.1f}%")
-    print(f"  in-sample {ret_in:+.1f}%   |   OOS {ret_oos:+.1f}%   (split @ {split_date})")
+    print(f"  period {m['start']} ~ {m['end']} ({m['days']} trading days)")
+    print(f"  signals: {m['admitted']} admitted ({m['same_day']} same-day) / {m['skipped']} "
+          f"skipped (slots full) / max concurrent {m['max_conc']}/{slots}")
+    print(f"  total return {m['ret']:+.1f}%   annualized {m['ann']:+.1f}%   real MDD {m['mdd']:.1f}%")
+    print(f"  in-sample {m['ret_in']:+.1f}%   |   OOS {m['ret_oos']:+.1f}%   (split @ {split_date})")
     print(f"  worst days (clustering check — realized KRW, #closed):")
-    for dt, (pnl, n) in worst:
+    for dt, (pnl, n) in m["worst"]:
         print(f"    {dt}  {pnl:>+12,.0f}  ({n} closed)")
-    if skipped > admitted:
-        print(f"  ⚠ skipped ({skipped}) > admitted ({admitted}): heavily slot-constrained — "
-              f"curve reflects a liquidity-ranked subset, not the full per-trade edge.")
+    if m["skipped"] > m["admitted"]:
+        print(f"  ⚠ skipped ({m['skipped']}) > admitted ({m['admitted']}): heavily slot-constrained "
+              f"— curve reflects a liquidity-ranked subset, not the full per-trade edge.")
+
+
+def equity_sweep(prices: dict[str, pd.DataFrame], base_p: dict, split_date: str) -> None:
+    """C-quick: judge exit payoffs on the PORTFOLIO objective (not per-trade avg). Per-trade
+    optimization favored 'let winners run' (no target, low win-rate) — but the 10-slot cap
+    can't harvest rare winners. Does a higher-win-rate 'take-profit' payoff give a more robust
+    portfolio (positive OOS, smaller IS/OOS gap, survivable MDD)? Entry filter held fixed."""
+    filt = dict(chg1_min=0.0, depth_min=1.0)
+    configs = [
+        ("noTgt/stop3/h10",  dict(stop_pct=3, target_pct=None, hold_days=10)),           # current v2
+        ("tgt5/stop3/h3",    dict(stop_pct=3, target_pct=5, hold_days=3)),               # take profit fast
+        ("tgt5/stop3/h10",   dict(stop_pct=3, target_pct=5, hold_days=10)),
+        ("tgt5/stop2/h3",    dict(stop_pct=2, target_pct=5, hold_days=3)),
+        ("tgt8/stop3/h5",    dict(stop_pct=3, target_pct=8, hold_days=5)),
+        ("tgt8/stop3/h10",   dict(stop_pct=3, target_pct=8, hold_days=10)),
+        ("trail3/stop3/h10", dict(stop_pct=3, target_pct=None, hold_days=10, trail_pct=3)),
+    ]
+    hdr = (f"  {'config':<18}{'ret%':>7}{'ann%':>7}{'MDD%':>7} | "
+           f"{'IS%':>7}{'OOS%':>7} | {'skip':>6}{'maxC':>5}")
+    print(f"\n=== C-QUICK: PORTFOLIO-OBJECTIVE EXIT PAYOFFS "
+          f"(10-slot · filter chg1>=0/depth>=1 · OOS split @ {split_date}) ===")
+    print(hdr); print("  " + "-" * (len(hdr) - 2))
+    for name, cfg in configs:
+        m = portfolio_equity(backtest(prices, dict(base_p, **filt, **cfg)), prices,
+                             split_date, verbose=False)
+        print(f"  {name:<18}{m['ret']:>+7.1f}{m['ann']:>+7.1f}{m['mdd']:>7.1f} | "
+              f"{m['ret_in']:>+7.1f}{m['ret_oos']:>+7.1f} | {m['skipped']:>6}{m['max_conc']:>5}")
+    print("  (need: OOS% > 0 AND small IS/OOS gap AND survivable MDD. per-trade optimum != this.)")
 
 
 def main():
@@ -409,6 +445,7 @@ def main():
     ap.add_argument("--sweep", action="store_true", help="exit-geometry sweep with OOS split")
     ap.add_argument("--filter-sweep", action="store_true", help="entry-quality filter sweep (OOS)")
     ap.add_argument("--equity", action="store_true", help="10-slot portfolio equity (v2 candidate)")
+    ap.add_argument("--equity-sweep", action="store_true", help="C-quick: exit payoffs on portfolio objective")
     ap.add_argument("--split", default="2026-01-31", help="in-sample/OOS entry-date boundary")
     a = ap.parse_args()
     p = dict(DEFAULTS, universe_top=a.universe_top)
@@ -432,6 +469,10 @@ def main():
         v2 = dict(p, chg1_min=0.0, depth_min=1.0, stop_pct=3.0, target_pct=None, hold_days=10)
         print(f"[3/3] 10-slot equity — v2 candidate (chg1>=0, depth>=1, stop3, no-target, hold10) ...")
         portfolio_equity(backtest(prices, v2), prices, a.split)
+        return
+    if a.equity_sweep:
+        print(f"[3/3] C-quick: exit payoffs judged on 10-slot portfolio objective ...")
+        equity_sweep(prices, p, a.split)
         return
 
     print(f"[3/3] backtest (v1: support MA{p['support_ma']}, stop -{p['stop_pct']}%, "
