@@ -175,6 +175,12 @@ for section in sections:
 reports = await asyncio.gather(*[generate_report(a, s) for s in sections])
 ```
 
+### Root Policy Modules
+Deterministic trading gates (`reentry_cooldown.py`, `daily_loss_kill.py`, `sim_broker.py`)
+are self-contained repo-root modules: stdlib+sqlite only (import-safe under KR/US shadow
+runtimes), **SHADOW-first** (log by default, enforce only via env flag e.g. `COOLDOWN_LIVE`),
+**fail-open** (errors → allow, never block a real trade).
+
 ## Trading Constraints
 
 ```python
