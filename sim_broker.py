@@ -12,7 +12,7 @@ Friction model (all env-configurable):
     because the real minimum friction IS the tick, which scales with price.
   - Commission (위탁수수료) = SIM_COMMISSION_RATE per side (default 0.015%).
   - Securities transaction tax (증권거래세) = SIM_TAX_RATE, SELL side only
-    (default 0.15% — 2025+ schedule; VERIFY the current rate).
+    (default 0.2% — 2026 rate).
 
 Self-contained (stdlib only), import-safe under root/prism-us runtimes.
 """
@@ -47,8 +47,8 @@ SIM_CAPITAL = _env_float("SIM_CAPITAL", 10_000_000.0)
 SIM_SLIPPAGE_TICKS = _env_int("SIM_SLIPPAGE_TICKS", 1)
 # Brokerage commission per side (fraction, not %). 0.00015 = 0.015%.
 SIM_COMMISSION_RATE = _env_float("SIM_COMMISSION_RATE", 0.00015)
-# Securities transaction tax, SELL side only (fraction). 0.0015 = 0.15% (2025+).
-SIM_TAX_RATE = _env_float("SIM_TAX_RATE", 0.0015)
+# Securities transaction tax, SELL side only (fraction). 0.002 = 0.2% (2026).
+SIM_TAX_RATE = _env_float("SIM_TAX_RATE", 0.002)
 
 
 def kr_tick_size(price: float) -> int:
