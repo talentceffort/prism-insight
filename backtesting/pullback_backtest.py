@@ -46,6 +46,10 @@ DEFAULTS = dict(
     target_pct=5.0,     # take-profit above support (%); None disables (run to trail/time)
     hold_days=3,        # time exit (bars)
     trail_pct=None,     # trailing stop from peak high (%); None disables
+    # --- entry-quality filters (exclude falling knives); None disables each ---
+    gap_min=None,       # require Open_d >= support*(1+gap_min/100)  (skip gap-down opens)
+    chg1_min=None,      # require prior-day change >= this %          (skip down days)
+    depth_min=None,     # require prior close >= support*(1+depth_min/100) (skip shallow)
 )
 
 
@@ -155,8 +159,16 @@ def backtest(prices: dict[str, pd.DataFrame], p: dict) -> list[dict]:
                 i += 1; continue
             if not (c1 > mt and r5 > p["uptrend_5d"] and ch < p["pump_pct"]):
                 i += 1; continue
+            if p.get("chg1_min") is not None and ch < p["chg1_min"]:   # skip prior-day-down (knife)
+                i += 1; continue
             support = ms
+            depth = (c1 / support - 1) * 100.0
+            if p.get("depth_min") is not None and depth < p["depth_min"]:  # skip shallow pullback
+                i += 1; continue
             if pd.isna(lo[i]) or lo[i] > support:                # no pullback touch today
+                i += 1; continue
+            if p.get("gap_min") is not None and (                # skip gap-down opens (knife)
+                    pd.isna(op[i]) or (op[i] / support - 1) * 100.0 < p["gap_min"]):
                 i += 1; continue
 
             # entry: buy-limit at support; gap-through the limit fills at the (lower) open
@@ -174,7 +186,7 @@ def backtest(prices: dict[str, pd.DataFrame], p: dict) -> list[dict]:
                 ticker=c, entry_date=date_str[i], exit_date=date_str[j],
                 reason=reason, net_pct=sb.net_trade_return_pct(entry, exit_px),
                 ret5=round(r5 * 100, 2), ext=round((c1 / mt - 1) * 100, 2),
-                depth=round((c1 / support - 1) * 100, 2), chg1=round(ch, 2), rank=int(rk),
+                depth=round(depth, 2), chg1=round(ch, 2), rank=int(rk),
                 from_high=round((c1 / h20v - 1) * 100, 2) if pd.notna(h20v) else None,
                 vol_ratio=round(vv[dm1] / vmv, 2) if (pd.notna(vmv) and vmv) else None,
                 gap=round((op[i] / support - 1) * 100, 2) if pd.notna(op[i]) else None,
@@ -250,6 +262,10 @@ def _num(m: dict, k: str):
     return m.get(k) if m.get("n") else None
 
 
+def _fnum(x, w=7, d=2):
+    return f"{x:>{w}.{d}f}" if isinstance(x, (int, float)) else f"{'—':>{w}}"
+
+
 def sweep(prices: dict[str, pd.DataFrame], base_p: dict, split_date: str) -> None:
     """Exit-geometry sweep judged on walk-forward OOS. Screening is held fixed; only
     stop/target/hold/trail vary. Ranked by IN-SAMPLE avg — the OOS columns show whether
@@ -263,9 +279,6 @@ def sweep(prices: dict[str, pd.DataFrame], base_p: dict, split_date: str) -> Non
         rows.append((g, m_in, m_out))
     rows.sort(key=lambda r: (_num(r[1], "avg_net") if _num(r[1], "avg_net") is not None else -99),
               reverse=True)
-
-    def fnum(x, w=7, d=2):
-        return f"{x:>{w}.{d}f}" if isinstance(x, (int, float)) else f"{'—':>{w}}"
     hdr = (f"  {'stop':>4}{'tgt':>5}{'hold':>5}{'trail':>6} | "
            f"{'IN n':>6}{'avg':>7}{'win%':>6}{'mdd':>6} | {'OOS n':>6}{'avg':>7}{'win%':>6}{'worst':>7}")
     print(f"\n=== EXIT-GEOMETRY SWEEP — OOS split @ {split_date} "
@@ -274,11 +287,40 @@ def sweep(prices: dict[str, pd.DataFrame], base_p: dict, split_date: str) -> Non
     for g, mi, mo in rows:
         print(f"  {g['stop_pct']:>4}{str(g['target_pct']):>5}{g['hold_days']:>5}"
               f"{str(g['trail_pct']):>6} | "
-              f"{(mi.get('n') or 0):>6}{fnum(_num(mi,'avg_net'))}{fnum(_num(mi,'win_rate'),6,1)}"
-              f"{fnum(_num(mi,'mdd_pct'),6,0)} | "
-              f"{(mo.get('n') or 0):>6}{fnum(_num(mo,'avg_net'))}{fnum(_num(mo,'win_rate'),6,1)}"
-              f"{fnum(_num(mo,'worst'),7,2)}")
+              f"{(mi.get('n') or 0):>6}{_fnum(_num(mi,'avg_net'))}{_fnum(_num(mi,'win_rate'),6,1)}"
+              f"{_fnum(_num(mi,'mdd_pct'),6,0)} | "
+              f"{(mo.get('n') or 0):>6}{_fnum(_num(mo,'avg_net'))}{_fnum(_num(mo,'win_rate'),6,1)}"
+              f"{_fnum(_num(mo,'worst'),7,2)}")
     print("  (avg = mean net % per trade after costs; edge must clear 0 on OOS to be real)")
+
+
+def filter_sweep(prices: dict[str, pd.DataFrame], base_p: dict, split_date: str) -> None:
+    """Entry-quality filter test on the OOS-winning exit geometry
+    (stop3 / no-target / hold10 / no-trail). Sweeps gap_min / chg1_min / depth_min.
+    Question: does excluding falling knives lift win-rate and shrink the left tail
+    WITHOUT cutting so many trades the edge becomes noise? Ranked by in-sample avg
+    (OOS already spent picking the exit geometry — final proof is forward sim)."""
+    exit_geo = dict(stop_pct=3.0, target_pct=None, hold_days=10, trail_pct=None)
+    grid = [dict(gap_min=g, chg1_min=ch, depth_min=dp)
+            for g in (None, 0.0, 1.0) for ch in (None, 0.0) for dp in (None, 1.0)]
+    rows = []
+    for f in grid:
+        m_in, m_out = _split(backtest(prices, dict(base_p, **exit_geo, **f)), split_date)
+        rows.append((f, m_in, m_out))
+    rows.sort(key=lambda r: (_num(r[1], "avg_net") if _num(r[1], "avg_net") is not None else -99),
+              reverse=True)
+    hdr = (f"  {'gap':>5}{'chg1':>6}{'depth':>6} | "
+           f"{'IN n':>6}{'avg':>7}{'win%':>6} | {'OOS n':>6}{'avg':>7}{'win%':>6}{'worst':>7}")
+    print(f"\n=== ENTRY-FILTER SWEEP — exit=stop3/noTgt/hold10 · OOS split @ {split_date} "
+          f"(ranked by in-sample avg) ===")
+    print(hdr); print("  " + "-" * (len(hdr) - 2))
+    for f, mi, mo in rows:
+        tag = "  <- no filter" if all(v is None for v in f.values()) else ""
+        print(f"  {str(f['gap_min']):>5}{str(f['chg1_min']):>6}{str(f['depth_min']):>6} | "
+              f"{(mi.get('n') or 0):>6}{_fnum(_num(mi,'avg_net'))}{_fnum(_num(mi,'win_rate'),6,1)} | "
+              f"{(mo.get('n') or 0):>6}{_fnum(_num(mo,'avg_net'))}{_fnum(_num(mo,'win_rate'),6,1)}"
+              f"{_fnum(_num(mo,'worst'),7,2)}{tag}")
+    print("  (goal: OOS avg up, OOS worst less negative, n not decimated vs no-filter row)")
 
 
 def main():
@@ -287,6 +329,7 @@ def main():
     ap.add_argument("--end", default="2026-07-03")
     ap.add_argument("--universe-top", type=int, default=DEFAULTS["universe_top"])
     ap.add_argument("--sweep", action="store_true", help="exit-geometry sweep with OOS split")
+    ap.add_argument("--filter-sweep", action="store_true", help="entry-quality filter sweep (OOS)")
     ap.add_argument("--split", default="2026-01-31", help="in-sample/OOS entry-date boundary")
     a = ap.parse_args()
     p = dict(DEFAULTS, universe_top=a.universe_top)
@@ -301,6 +344,10 @@ def main():
     if a.sweep:
         print(f"[3/3] exit-geometry sweep (screening fixed) ...")
         sweep(prices, p, a.split)
+        return
+    if a.filter_sweep:
+        print(f"[3/3] entry-quality filter sweep (exit geometry fixed) ...")
+        filter_sweep(prices, p, a.split)
         return
 
     print(f"[3/3] backtest (v1: support MA{p['support_ma']}, stop -{p['stop_pct']}%, "
