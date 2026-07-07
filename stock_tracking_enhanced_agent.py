@@ -632,11 +632,6 @@ class EnhancedStockTrackingAgent(StockTrackingAgent):
 
                 # Process buy if entry decision
                 if decision == "Enter" and buy_score >= min_score and sector_diverse:
-                    if self._is_sim_mode():
-                        # Observation/paper: emit a buy SIGNAL (alert + watchlist) and skip
-                        # KIS entirely — a signal is not a trade, so no order and no holding.
-                        await self._emit_buy_signal(ticker, company_name, current_price, scenario, sector, rank_change_msg)
-                        continue
                     # Theme A — order-before-record: place the real KIS order FIRST and
                     # write the holding to the DB ONLY if the order was accepted, so a
                     # rejected/failed order never leaves a phantom position. Slot/holding
@@ -653,6 +648,12 @@ class EnhancedStockTrackingAgent(StockTrackingAgent):
                                 scenario['target_price'] = await self._dynamic_target_price(ticker, current_price)
                             if scenario.get('stop_loss', 0) <= 0:
                                 scenario['stop_loss'] = await self._dynamic_stop_loss(ticker, current_price)
+                            if self._is_sim_mode():
+                                # Observation/paper: same slot gate + computed levels as a real
+                                # entry, but emit a buy SIGNAL (alert + watchlist) instead of
+                                # ordering. No KIS, no holding — a signal is not a trade.
+                                await self._emit_buy_signal(ticker, company_name, current_price, scenario, sector, rank_change_msg)
+                                continue
                             async with AsyncTradingContext() as trading:
                                 # Execute async buy with limit price for reserved orders
                                 trade_result = await trading.async_buy_stock(stock_code=ticker, limit_price=current_price)

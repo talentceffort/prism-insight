@@ -1971,13 +1971,6 @@ class StockTrackingAgent:
                         state["skip_reason"] = f"일일손실/드로다운 킬스위치 ({_kill['reason']})"
 
                     if analysis_result.get("decision") == "Enter" and not _cd_block and not _kill_block:
-                        if self._is_sim_mode():
-                            # Observation/paper: emit a buy SIGNAL (alert + watchlist), skip KIS.
-                            # _emit_buy_signal already records the watchlist row, so suppress the
-                            # deferred-save loop below to avoid a duplicate row.
-                            await self._emit_buy_signal(ticker, company_name, current_price, scenario, sector, rank_change_msg)
-                            state["should_save_watchlist"] = False
-                            continue
                         # Theme A (P1-1) — order-before-record on the base/CLI path too:
                         # gate first, place the order, then record (validated=True →
                         # record-only). A rejected order leaves no phantom holding.
@@ -1987,6 +1980,17 @@ class StockTrackingAgent:
                         else:
                             from trading.domestic_stock_trading import AsyncTradingContext
                             try:
+                                if self._is_sim_mode():
+                                    # Observation/paper: same slot gate as a real entry; emit a buy
+                                    # SIGNAL (alert + watchlist) with the scenario's levels instead of
+                                    # ordering. (The dynamic target/stop fallback lives on the enhanced
+                                    # agent, not the base, so use the scenario as-is — matching this
+                                    # path's real behavior, which records via buy_stock(validated).)
+                                    # _emit_buy_signal records the watchlist row, so suppress the
+                                    # deferred-save loop below to avoid a duplicate. No KIS.
+                                    await self._emit_buy_signal(ticker, company_name, current_price, scenario, sector, rank_change_msg)
+                                    state["should_save_watchlist"] = False
+                                    continue
                                 async with AsyncTradingContext(account_name=account["name"]) as trading:
                                     trade_result = await trading.async_buy_stock(stock_code=ticker, limit_price=current_price)
                             except Exception as order_err:

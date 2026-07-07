@@ -275,6 +275,15 @@ def get_configured_accounts(
 
     Requires the multi-account `accounts` list in kis_devlp.yaml.
     """
+    if str(_cfg.get("default_mode", "demo")).strip().lower() == "sim":
+        # Global sim (observation/paper) seal at the shared account-resolution boundary:
+        # resolve_account() funnels through here, so NO path (KR/US tracking, migrations,
+        # weekly, dashboards, broker constructors) can resolve or authenticate a real/demo
+        # account in sim. Buys emit signals via the tracking dispatch instead.
+        raise RuntimeError(
+            "sim mode (observation/paper) has no KIS account — account resolution is disabled. "
+            "Emit signals or use market data instead of a broker connection."
+        )
     requested_svr = _normalize_server_mode(svr) if svr is not None else None
     requested_product = str(product) if product is not None else None
     requested_market = _normalize_market(market) if market else None
