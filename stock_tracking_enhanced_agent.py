@@ -632,6 +632,11 @@ class EnhancedStockTrackingAgent(StockTrackingAgent):
 
                 # Process buy if entry decision
                 if decision == "Enter" and buy_score >= min_score and sector_diverse:
+                    if self._is_sim_mode():
+                        # Observation/paper: emit a buy SIGNAL (alert + watchlist) and skip
+                        # KIS entirely — a signal is not a trade, so no order and no holding.
+                        await self._emit_buy_signal(ticker, company_name, current_price, scenario, sector, rank_change_msg)
+                        continue
                     # Theme A — order-before-record: place the real KIS order FIRST and
                     # write the holding to the DB ONLY if the order was accepted, so a
                     # rejected/failed order never leaves a phantom position. Slot/holding

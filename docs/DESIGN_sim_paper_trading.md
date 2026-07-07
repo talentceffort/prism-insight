@@ -32,9 +32,10 @@ LLM 자동 스크리닝이 실제로 오르는 종목을 고르는지를, 브로
 ## 안 하는 것
 정밀 체결 재현(고정 틱=근사) · 눌림목 진입(별도 KRX 백테스트) · 실주문(sim은 KIS 미접촉).
 
-## 할 일
+## 할 일 (단계별 — 1차 목표 = 신호 알림, 페이퍼 포지션은 그 다음)
 - [x] `sim_broker.py` (비용·체결, 테스트 8/8)
-- [ ] 합성 sim 계좌 (`_get_trading_accounts`가 sim일 때 `sim:...` 계좌 1개 반환)
-- [ ] 디스패치 분기 (매수/매도에서 sim → sim_broker + 명목원장, KIS skip)
-- [ ] equity 계산(기존 stock_holdings/trading_history 기반, 신규 테이블 없음) + `equity_tracker` 스냅샷
-- [ ] sim 1사이클 스모크 (원장·equity 확인)
+- [x] 합성 sim 계좌 — `TradingMode` VO(`trading/trading_mode.py`) + `_get_trading_accounts`·마이그레이션(`db_schema._get_primary_account_scope`)이 sim이면 `SIM_ACCOUNT_KEY` 반환. **sim은 어디서도 실계좌 미접촉** (codex 리뷰로 마이그레이션 누수까지 봉인).
+- [x] **Phase-1 (1차 목표): 매수 신호 알림** — sim이면 매수 디스패치(base+enhanced)가 KIS 스킵하고 `_emit_buy_signal`로 텔레그램 신호 + watchlist 기록. `_snapshot_equity_for_kill`도 sim에서 KIS 스킵.
+- [ ] **Phase-1.5: 페이퍼 포지션 + equity** — sim 매수 시 `stock_holdings`/`trading_history`에 `sim_broker` 체결 기록 → 매도·equity·MDD(상단 equity 설계). *현재는 알림만이라 미실현 손익 없음.*
+- [ ] equity 계산 + `equity_tracker` 스냅샷 (Phase-1.5에 포함)
+- [ ] sim 1사이클 스모크 (Phase-1: 신호 알림 / Phase-1.5: 원장·equity)

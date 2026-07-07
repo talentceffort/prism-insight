@@ -84,6 +84,7 @@ from tracking import (
     TelegramSender,
 )
 from trading import kis_auth as ka
+from trading.trading_mode import TradingMode, SIM_ACCOUNT_KEY, SIM_ACCOUNT_NAME
 
 # Create MCPApp instance
 app = MCPApp(name="stock_tracking")
@@ -200,9 +201,54 @@ class StockTrackingAgent:
         create_indexes(self.cursor, self.conn)
 
     def _get_trading_accounts(self) -> List[Dict[str, Any]]:
-        default_mode = str(ka.getEnv().get("default_mode", "demo")).strip().lower()
-        svr = "vps" if default_mode == "demo" else "prod"
+        mode = TradingMode.from_env()
+        if mode.is_sim:
+            # Observation/paper: never resolve a real/demo KIS account. One synthetic
+            # account carries the sim scope through the existing account-keyed DB logic.
+            return [self._sim_account()]
+        svr = "vps" if mode.is_demo else "prod"
         return ka.get_configured_accounts(svr=svr, market="kr")
+
+    @staticmethod
+    def _sim_account() -> Dict[str, Any]:
+        """Synthetic account for sim mode. account_key namespaces sim rows in the
+        existing account-keyed tables; it is never used to reach KIS (the buy/sell
+        dispatch skips all orders when the mode does not execute)."""
+        return {"account_key": SIM_ACCOUNT_KEY, "name": SIM_ACCOUNT_NAME}
+
+    def _is_sim_mode(self) -> bool:
+        """Observation/paper mode: the dispatch emits buy SIGNALS + alerts, no KIS orders."""
+        return TradingMode.from_env().is_sim
+
+    async def _emit_buy_signal(self, ticker: str, company_name: str, current_price: float,
+                               scenario: Dict[str, Any], sector: str, rank_change_msg: str = "") -> None:
+        """Sim/observation: queue a concise buy-SIGNAL Telegram alert and record the analysis
+        to the watchlist for forward tracking. No KIS order and no holding row — a signal is
+        an alert to consider, not a trade receipt (which is why it reads differently)."""
+        tp = scenario.get("target_price", 0)
+        sl = scenario.get("stop_loss", 0)
+        rr = scenario.get("risk_reward_ratio", 0)
+        buy_score = scenario.get("buy_score", 0)
+        min_score = scenario.get("min_score", 0)
+        rr_str = f" (R/R {rr:.1f})" if isinstance(rr, (int, float)) and rr else ""
+        lines = [
+            f"📊 매수 신호 (관찰): {company_name}({ticker})",
+            f"현재가: {current_price:,.0f}원",
+            f"목표가: {tp:,.0f}원 / 손절가: {sl:,.0f}원{rr_str}",
+            f"점수: {buy_score}/{min_score}",
+            f"산업군: {scenario.get('sector', sector)}",
+        ]
+        if rank_change_msg:
+            lines.append(f"거래대금: {rank_change_msg}")
+        lines.append(f"근거: {scenario.get('rationale', '정보 없음')}")
+        self._msg_types.append("analysis")
+        self.message_queue.append("\n".join(lines) + "\n")
+        await self._save_watchlist_item(
+            ticker=ticker, company_name=company_name, current_price=current_price,
+            buy_score=buy_score, min_score=min_score, decision="Watch",
+            skip_reason="관찰 모드 — 매수 신호 (주문 미실행)", scenario=scenario, sector=sector,
+        )
+        logger.info(f"[SIM] Buy signal emitted: {company_name}({ticker}) @ {current_price:,.0f} KRW")
 
     def _set_active_account(self, account: Dict[str, Any]) -> None:
         self.active_account = account
@@ -250,6 +296,8 @@ class StockTrackingAgent:
         back to whatever snapshots already exist (and to allow when there are none).
         Runs per account each cycle, so multi-account setups all get a fresh point.
         """
+        if self._is_sim_mode():
+            return  # sim never has a KIS balance to snapshot (a signal is not a position)
         try:
             import daily_loss_kill
             if not daily_loss_kill.ENABLED:
@@ -1923,6 +1971,13 @@ class StockTrackingAgent:
                         state["skip_reason"] = f"일일손실/드로다운 킬스위치 ({_kill['reason']})"
 
                     if analysis_result.get("decision") == "Enter" and not _cd_block and not _kill_block:
+                        if self._is_sim_mode():
+                            # Observation/paper: emit a buy SIGNAL (alert + watchlist), skip KIS.
+                            # _emit_buy_signal already records the watchlist row, so suppress the
+                            # deferred-save loop below to avoid a duplicate row.
+                            await self._emit_buy_signal(ticker, company_name, current_price, scenario, sector, rank_change_msg)
+                            state["should_save_watchlist"] = False
+                            continue
                         # Theme A (P1-1) — order-before-record on the base/CLI path too:
                         # gate first, place the order, then record (validated=True →
                         # record-only). A rejected order leaves no phantom holding.

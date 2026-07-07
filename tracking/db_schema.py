@@ -336,11 +336,23 @@ def _get_copy_columns(source_columns: list[str], target_columns: list[str]) -> l
 
 
 def _get_primary_account_scope() -> tuple[str, str]:
+    from trading.trading_mode import TradingMode
+
+    mode = TradingMode.from_env()
+    if mode.is_sim:
+        # A legacy (pre-multi-account) DB reaching here has real/demo rows to backfill.
+        # Relabeling them as sim would corrupt their scope and pollute sim metrics — refuse
+        # rather than silently mislabel. (Raised before the try so it is not swallowed.)
+        raise RuntimeError(
+            "default_mode=sim cannot migrate legacy account-less rows (they belong to a "
+            "real/demo account). Run once under the original demo/real mode to migrate, "
+            "then switch to sim."
+        )
+
     try:
         from trading import kis_auth as ka
 
-        default_mode = str(ka.getEnv().get("default_mode", "demo")).strip().lower()
-        svr = "vps" if default_mode == "demo" else "prod"
+        svr = "vps" if mode.is_demo else "prod"
         primary_account = ka.resolve_account(svr=svr, market="kr")
         return primary_account["account_key"], primary_account["name"]
     except Exception as exc:
