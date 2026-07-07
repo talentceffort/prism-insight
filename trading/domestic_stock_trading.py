@@ -102,10 +102,10 @@ def _safe_int(value: Any, default: int = 0) -> int:
 
 def _refuse_if_sim(mode: str) -> None:
     """Argument-level sim seal: refuse an explicit mode='sim' before env is derived (which would
-    otherwise map any non-'demo' mode to 'prod'). Complements the config-level seal in kis_auth —
-    different trigger: an explicit constructor argument vs the global default_mode."""
-    from trading.trading_mode import TradingMode
-    if TradingMode.from_name(mode).is_sim:
+    otherwise map any non-'demo' mode to 'prod'). Complements the config-level seal in kis_auth
+    (different trigger: explicit arg vs global default_mode). Inlines the 'sim' compare — no
+    package import — so it stays safe under this module's same-directory/script execution path."""
+    if str(mode or "").strip().lower() == "sim":
         raise RuntimeError(
             "sim mode has no KIS account — do not construct a broker connection in sim "
             "(emit a signal or use KRX/sim data instead)."
