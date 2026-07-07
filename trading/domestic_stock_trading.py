@@ -100,6 +100,18 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def _refuse_if_sim(mode: str) -> None:
+    """Argument-level sim seal: refuse an explicit mode='sim' before env is derived (which would
+    otherwise map any non-'demo' mode to 'prod'). Complements the config-level seal in kis_auth —
+    different trigger: an explicit constructor argument vs the global default_mode."""
+    from trading.trading_mode import TradingMode
+    if TradingMode.from_name(mode).is_sim:
+        raise RuntimeError(
+            "sim mode has no KIS account — do not construct a broker connection in sim "
+            "(emit a signal or use KRX/sim data instead)."
+        )
+
+
 class DomesticStockTrading:
     """Domestic stock trading class"""
 
@@ -130,6 +142,7 @@ class DomesticStockTrading:
         Raises:
             RuntimeError: Authentication failed with detailed error message
         """
+        _refuse_if_sim(mode)
         self.mode = mode
         self.env = "vps" if mode == "demo" else "prod"
         self.auto_trading = auto_trading
@@ -1926,6 +1939,7 @@ class MultiAccountDomesticStockTrading:
     """Fan out trading orders to all configured domestic accounts for the current mode."""
 
     def __init__(self, mode: str, buy_amount: int = None, auto_trading: bool = DomesticStockTrading.AUTO_TRADING, product_code: str = "01"):
+        _refuse_if_sim(mode)
         self.mode = mode
         self.buy_amount = buy_amount
         self.auto_trading = auto_trading

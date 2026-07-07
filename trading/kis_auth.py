@@ -264,6 +264,19 @@ def _build_legacy_accounts() -> list[dict[str, Any]]:
     return [account for account in legacy_accounts if account]
 
 
+def _sim_configured() -> bool:
+    """True when default_mode=sim (observation/paper). In sim NO KIS account/token/approval is
+    ever resolved or requested — the tracking dispatch emits signals instead. Checked at each
+    KIS network boundary below so every module (KR/US/weekly/dashboards) is covered in one place."""
+    return str(_cfg.get("default_mode", "demo")).strip().lower() == "sim"
+
+
+_SIM_NO_KIS_MSG = (
+    "sim mode (observation/paper) has no KIS account — broker access is disabled. "
+    "Emit signals or use market data instead of a broker connection."
+)
+
+
 def get_configured_accounts(
     svr: str | None = None,
     product: str | None = None,
@@ -275,15 +288,10 @@ def get_configured_accounts(
 
     Requires the multi-account `accounts` list in kis_devlp.yaml.
     """
-    if str(_cfg.get("default_mode", "demo")).strip().lower() == "sim":
-        # Global sim (observation/paper) seal at the shared account-resolution boundary:
-        # resolve_account() funnels through here, so NO path (KR/US tracking, migrations,
-        # weekly, dashboards, broker constructors) can resolve or authenticate a real/demo
-        # account in sim. Buys emit signals via the tracking dispatch instead.
-        raise RuntimeError(
-            "sim mode (observation/paper) has no KIS account — account resolution is disabled. "
-            "Emit signals or use market data instead of a broker connection."
-        )
+    if _sim_configured():
+        # resolve_account() funnels through here, so this single check blocks account
+        # resolution for every module (KR/US/weekly/dashboards/broker constructors) in sim.
+        raise RuntimeError(_SIM_NO_KIS_MSG)
     requested_svr = _normalize_server_mode(svr) if svr is not None else None
     requested_product = str(product) if product is not None else None
     requested_market = _normalize_market(market) if market else None
@@ -845,6 +853,11 @@ def _request_token_with_retry(url: str, params: dict, headers: dict) -> dict:
     - Does NOT retry on 401/403 (authentication failures)
     - Raises TokenRequestError on failure
     """
+    if _sim_configured():
+        # Token seal: the actual KIS token HTTP call every auth() path funnels through, so sim
+        # cannot obtain a token even if account resolution was bypassed (e.g. auth()'s global-cred
+        # fallback swallowing the resolve seal). No token -> no authenticated KIS call.
+        raise RuntimeError(_SIM_NO_KIS_MSG)
     try:
         res = requests.post(url, data=json.dumps(params), headers=headers, timeout=30)
     except requests.RequestException as e:
@@ -1424,6 +1437,9 @@ def _getBaseHeader_ws():
 
 
 def auth_ws(svr="prod", product=DEFAULT_PRODUCT_CODE, account_name=None, account_index=None, account_key=None):
+    if _sim_configured():
+        # Approval-key POST below is a separate KIS network call (not via _request_token_with_retry).
+        raise RuntimeError(_SIM_NO_KIS_MSG)
     p = {"grant_type": "client_credentials"}
     if svr == "prod":
         ak1 = "my_app"
