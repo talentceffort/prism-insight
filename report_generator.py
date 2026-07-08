@@ -372,17 +372,15 @@ def get_cached_report(stock_code: str) -> tuple:
     if file_age.days >= 1:  # Don't use files older than 24 hours as cache
         return False, "", None, None
 
-    # Check if corresponding PDF file exists
-    pdf_file = None
-    pdf_files = list(PDF_REPORTS_DIR.glob(f"{stock_code}_*.pdf"))
-    if pdf_files:
-        pdf_file = max(pdf_files, key=lambda p: p.stat().st_mtime)
-
     with open(latest_file, "r", encoding="utf-8") as f:
         content = f.read()
 
-    # Generate PDF if it doesn't exist
-    if not pdf_file:
+    # Match the PDF to THIS report by stem ({code}_{name}_{date}_analysis) and render it when
+    # missing. The scheduled run no longer pre-renders PDFs, and the old date-agnostic glob
+    # ("latest {code}_*.pdf") could attach a stale older-date PDF — so require the exact stem
+    # and render on miss, so /report always sends the PDF matching the returned markdown.
+    pdf_file = PDF_REPORTS_DIR / f"{latest_file.stem}.pdf"
+    if not pdf_file.exists():
         # Extract company name (filename format: {code}_{name}_{date}_analysis.md)
         company_name = os.path.basename(latest_file).split('_')[1]
         pdf_file = save_pdf_report(stock_code, company_name, latest_file)
