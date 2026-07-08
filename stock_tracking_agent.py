@@ -470,9 +470,10 @@ class StockTrackingAgent:
 
             rank_change_percentage, rank_change_msg = await self._get_trading_value_rank_change(ticker)
 
-            from pdf_converter import pdf_to_markdown_text
+            from pdf_converter import read_report_text
 
-            report_content = pdf_to_markdown_text(pdf_report_path)
+            # Buy/sell decision reads the ORIGINAL markdown, not a lossy PDF re-extraction.
+            report_content = read_report_text(pdf_report_path)
             trigger_info = getattr(self, 'trigger_info_map', {}).get(ticker, {})
             trigger_type = trigger_info.get('trigger_type', '')
             trigger_mode = trigger_info.get('trigger_mode', '')

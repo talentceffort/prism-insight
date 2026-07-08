@@ -631,17 +631,9 @@ class StockAnalysisOrchestrator:
                 msg_type="analysis"
             )
 
-            # Send PDF files to main channel
-            for pdf_path in pdf_paths:
-                logger.info(f"Sending PDF file: {pdf_path}")
-                success = await bot_agent.send_document(chat_id, str(pdf_path), msg_type="pdf")
-                if success:
-                    logger.info(f"PDF file transmission successful: {pdf_path}")
-                else:
-                    logger.error(f"PDF file transmission failed: {pdf_path}")
-
-                # Transmission interval
-                await asyncio.sleep(1)
+            # (Main-channel PDF attachment removed — the Telegram summary already carries the
+            # analysis, so the attached PDF was redundant. PDFs are only rendered now when the
+            # insight-image broadcast is enabled; /report still delivers its own PDF on demand.)
 
             # Phase 6 S6: broadcast annotated insight images (default-OFF, non-blocking).
             # One image per company AFTER its PDF. KR -> market=None (auto
@@ -1116,23 +1108,31 @@ class StockAnalysisOrchestrator:
             except Exception as _e:
                 logger.warning(f"Archive ingest hook skipped: {_e}")
 
-            # 3. PDF conversion
-            pdf_paths = await self.convert_to_pdf(report_paths)
+            # 3. PDF conversion — only when a downstream consumer needs the rendered PDF.
+            # Summary + tracking now read the original markdown (report_paths); the main-channel
+            # attachment is dropped; broadcast translates from markdown. So the only pre-rendered
+            # PDF consumer left is the default-off insight-image broadcast. (/report renders its
+            # own PDF on demand, unaffected.) Skipping this also drops Playwright from the run.
+            _insight_images_on = os.environ.get("PRISM_FEATURE_INSIGHT_IMAGE", "").strip().lower() in ("1", "true", "yes", "on")
+            pdf_paths = await self.convert_to_pdf(report_paths) if _insight_images_on else []
 
             # 4-5. Generate and send telegram messages (only when telegram is enabled)
             if self.telegram_config.use_telegram:
                 logger.info("Telegram enabled - proceeding with message generation and transmission steps")
 
-                # 4. Generate telegram messages
-                message_paths = await self.generate_telegram_messages(pdf_paths, language)
+                # 4. Generate telegram messages — from the original markdown reports
+                # (read_report_text prefers the .md, so no PDF is required here).
+                message_paths = await self.generate_telegram_messages(report_paths, language)
 
                 # 5. Send telegram messages and PDFs
                 await self.send_telegram_messages(message_paths, pdf_paths, report_paths)
             else:
                 logger.info("Telegram disabled - skipping message generation and transmission steps")
 
-            # 6. Tracking system batch (runs concurrently with broadcast I/O tasks via async)
-            if pdf_paths:
+            # 6. Tracking system batch (runs concurrently with broadcast I/O tasks via async).
+            # Gated on report_paths (markdown), not pdf_paths — the buy/sell decision reads the
+            # markdown now, so tracking must run even when no PDF was rendered.
+            if report_paths:
                 try:
                     logger.info("Starting stock tracking system batch execution")
 
@@ -1172,7 +1172,7 @@ class StockAnalysisOrchestrator:
                             kr_sector_names = sorted(set(macro_context["sector_map"].values()))
 
                         tracking_success = await tracking_agent.run(
-                            pdf_paths, chat_id, language, self.telegram_config,
+                            report_paths, chat_id, language, self.telegram_config,
                             trigger_results_file=trigger_results_file,
                             sector_names=kr_sector_names
                         )

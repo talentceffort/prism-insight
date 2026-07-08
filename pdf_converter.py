@@ -1444,6 +1444,27 @@ def pdf_to_markdown_text(pdf_path):
     return convert_to_markdown(text)
 
 
+def read_report_text(report_path) -> str:
+    """Return an analysis report as text, preferring the ORIGINAL markdown over a lossy PDF
+    re-extraction. Downstream LLM steps (Telegram summary, buy/sell decision) must read the
+    clean markdown the agents wrote — not text scraped back out of the rendered PDF (which
+    mangles tables/formatting and degrades the decision).
+
+      1) a .md path            -> read directly
+      2) a .pdf path           -> read the sibling reports/<stem>.md (same stem as the pdf)
+      3) neither available     -> fall back to extracting the PDF (e.g. an on-demand /report
+                                  cache where only the PDF was kept)
+    """
+    from pathlib import Path
+    p = Path(report_path)
+    if p.suffix.lower() == ".md" and p.exists():
+        return p.read_text(encoding="utf-8")
+    md_sibling = Path("reports") / f"{p.stem}.md"
+    if md_sibling.exists():
+        return md_sibling.read_text(encoding="utf-8")
+    return pdf_to_markdown_text(str(report_path))
+
+
 if __name__ == "__main__":
     # Test code
     import sys
