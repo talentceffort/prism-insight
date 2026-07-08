@@ -1455,7 +1455,7 @@ def _strip_base64_images(text: str) -> str:
     return text
 
 
-def read_report_text(report_path) -> str:
+def read_report_text(report_path, md_dir="reports") -> str:
     """Return an analysis report as text, preferring the ORIGINAL markdown over a lossy PDF
     re-extraction. Downstream LLM steps (Telegram summary, buy/sell decision) must read the
     clean markdown the agents wrote — not text scraped back out of the rendered PDF (which
@@ -1463,15 +1463,18 @@ def read_report_text(report_path) -> str:
     stripped (they are useless to a text LLM and the old PDF path omitted them anyway).
 
       1) a .md path            -> read directly
-      2) a .pdf path           -> read the sibling reports/<stem>.md (same stem as the pdf)
+      2) a .pdf path           -> read the sibling <md_dir>/<stem>.md (same stem as the pdf)
       3) neither available     -> fall back to extracting the PDF (e.g. an on-demand /report
                                   cache where only the PDF was kept)
+
+    md_dir = directory holding the original markdown reports (default "reports" for KR; the US
+    module passes its own prism-us/reports so the sibling lookup resolves in the US tree).
     """
     from pathlib import Path
     p = Path(report_path)
     if p.suffix.lower() == ".md" and p.exists():
         return _strip_base64_images(p.read_text(encoding="utf-8"))
-    md_sibling = Path("reports") / f"{p.stem}.md"
+    md_sibling = Path(md_dir) / f"{p.stem}.md"
     if md_sibling.exists():
         return _strip_base64_images(md_sibling.read_text(encoding="utf-8"))
     return pdf_to_markdown_text(str(report_path))
