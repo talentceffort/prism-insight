@@ -68,18 +68,18 @@ class USTelegramSummaryGenerator:
 
     async def read_report(self, report_path: str) -> str:
         """
-        Read report file content.
+        Read report content — prefer the ORIGINAL markdown over a lossy PDF re-extraction.
 
         Args:
-            report_path: Path to the report file
+            report_path: Path to the report file (.md or .pdf; a .pdf resolves to its
+                same-stem sibling markdown in US_REPORTS_DIR)
 
         Returns:
             Report content as string
         """
         try:
-            with open(report_path, 'r', encoding='utf-8') as file:
-                content = file.read()
-            return content
+            from pdf_converter import read_report_text
+            return read_report_text(report_path, md_dir=str(US_REPORTS_DIR))
         except Exception as e:
             logger.error(f"Failed to read report file: {e}")
             raise
@@ -88,7 +88,7 @@ class USTelegramSummaryGenerator:
         """
         Extract ticker, company name, and date from filename.
 
-        US filename format: AAPL_Apple Inc_20260118_gpt5.4-mini.pdf
+        US filename format: AAPL_Apple Inc_20260118_gpt5.4-mini.md
 
         Args:
             filename: Report filename
@@ -96,8 +96,8 @@ class USTelegramSummaryGenerator:
         Returns:
             Dictionary with ticker, company_name, date
         """
-        # US filename pattern: TICKER_CompanyName_YYYYMMDD_*.pdf
-        pattern = r'([A-Z]+)_(.+)_(\d{8})_.*\.pdf'
+        # US filename pattern: TICKER_CompanyName_YYYYMMDD_*.(pdf|md)
+        pattern = r'([A-Z]+)_(.+)_(\d{8})_.*\.(?:pdf|md)'
         match = re.match(pattern, filename)
 
         if match:
@@ -627,9 +627,9 @@ This information is for reference only. Investment decisions and responsibilitie
 
             logger.info(f"Processing: {filename} - {metadata['company_name']} ({metadata['ticker']})")
 
-            # Read report content
-            from pdf_converter import pdf_to_markdown_text
-            report_content = pdf_to_markdown_text(report_pdf_path)
+            # Read report content — prefer the original markdown over PDF re-extraction.
+            from pdf_converter import read_report_text
+            report_content = read_report_text(report_pdf_path, md_dir=str(US_REPORTS_DIR))
 
             # Determine trigger type and mode
             trigger_type, trigger_mode = self.determine_trigger_type(
@@ -680,9 +680,9 @@ async def process_all_reports(
         date_filter: Date filter (YYYYMMDD)
         language: Target language (default: "ko")
     """
-    # Default directories
+    # Default directories — read the ORIGINAL markdown reports, not the rendered PDFs.
     if reports_dir is None:
-        reports_dir = str(US_PDF_REPORTS_DIR)
+        reports_dir = str(US_REPORTS_DIR)
     if output_dir is None:
         output_dir = str(US_TELEGRAM_MSGS_DIR)
 
@@ -695,8 +695,12 @@ async def process_all_reports(
         logger.error(f"Reports directory does not exist: {reports_dir}")
         return
 
-    # Find report files
-    report_files = list(reports_path.glob("*.pdf"))
+    # Find report files — prefer the original markdown, but still pick up PDFs that have no
+    # sibling .md in this dir, so pointing --reports-dir at a PDF-only cache is not silently
+    # skipped (read_report_text extracts the PDF as a last resort).
+    report_files = list(reports_path.glob("*.md"))
+    _md_stems = {f.stem for f in report_files}
+    report_files += [f for f in reports_path.glob("*.pdf") if f.stem not in _md_stems]
 
     # Apply date filter
     if date_filter:
@@ -730,7 +734,7 @@ async def main():
     )
     parser.add_argument(
         "--reports-dir",
-        default=str(US_PDF_REPORTS_DIR),
+        default=str(US_REPORTS_DIR),
         help="Directory containing report files"
     )
     parser.add_argument(
