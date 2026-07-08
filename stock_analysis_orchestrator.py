@@ -448,11 +448,25 @@ class StockAnalysisOrchestrator:
                 return []
 
             # Read results file for full data with metadata
+            full_results = {}
             if os.path.exists(results_file):
                 with open(results_file, 'r', encoding='utf-8') as f:
                     full_results = json.load(f)
                 # Save results
                 self.selected_tickers[mode] = full_results
+
+            # Authoritative code -> name from the trigger results (trigger_batch already
+            # resolved names into this JSON). Read the name from HERE, not from ad-hoc
+            # DataFrame columns + a pykrx fallback: the column names never matched (actual
+            # column is "stock_name", not "Company Name"/"종목명") and the pykrx fallback is
+            # dead on this deploy (krx_data_client, not pykrx), so name silently became "" and
+            # a fabricated "Stock_{code}" masked the real failure. No silent fallback here.
+            name_by_code = {
+                s['code']: s['name']
+                for stocks in full_results.values() if isinstance(stocks, list)
+                for s in stocks
+                if isinstance(s, dict) and s.get('code') and s.get('name')
+            }
 
             # Extract stock codes from results
             tickers = []
@@ -464,24 +478,11 @@ class StockAnalysisOrchestrator:
                     for ticker in stocks_df.index:
                         if ticker not in ticker_codes:
                             ticker_codes.add(ticker)
-                            # Get stock name (with fallback to pykrx API)
-                            name = ""
-                            # Support both Korean and English column names
-                            name_col = None
-                            if "Company Name" in stocks_df.columns:
-                                name_col = "Company Name"
-                            elif "종목명" in stocks_df.columns:
-                                name_col = "종목명"
-
-                            if name_col:
-                                name = stocks_df.loc[ticker, name_col]
-                            # Fallback: use pykrx API if name is empty
+                            # Name from the authoritative trigger results (see name_by_code).
+                            # If missing, log loudly — do NOT fabricate a placeholder name.
+                            name = name_by_code.get(ticker, "")
                             if not name:
-                                try:
-                                    from pykrx import stock as stock_api
-                                    name = stock_api.get_market_ticker_name(ticker) or ""
-                                except Exception:
-                                    pass
+                                logger.warning(f"[NAME] no resolved name for {ticker} in trigger results — check trigger_batch name resolution")
 
                             # Get risk_reward_ratio if available
                             rr_ratio = 0
@@ -1235,11 +1236,15 @@ class StockAnalysisOrchestrator:
             # If ticker_info is a dict
             if isinstance(ticker_info, dict):
                 ticker = ticker_info.get('code')
-                # Use 'or' to handle both None and empty string cases
-                company_name = ticker_info.get('name') or f"Stock_{ticker}"
+                company_name = ticker_info.get('name') or ""
             else:
                 ticker = ticker_info
-                company_name = f"Stock_{ticker}"
+                company_name = ""
+            # No fabricated name: an unresolved name is logged loudly and shown as the real
+            # code, never a fake "Stock_{code}" that mimics a company name and hides the miss.
+            if not company_name:
+                logger.error(f"[NAME] {ticker} has no resolved name — using code; check trigger-stage name resolution")
+                company_name = ticker
 
             logger.info(f"[{idx}/{len(tickers)}] Starting stock analysis: {company_name}({ticker})")
 
