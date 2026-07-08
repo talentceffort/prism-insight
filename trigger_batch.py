@@ -381,6 +381,52 @@ SIDEWAYS_MA20_SUPPORT_TOLERANCE = 0.97
 # Multi-week relative-strength lookback (trading days, ~3 months).
 SCREENING_SIGNAL_LOOKBACK_DAYS = 60
 
+# 거래대금 폭발 확인 (value-spike confirmation) — docs/DESIGN_screening_strategy.md.
+# Intent: reject "가격은 올랐는데 돈은 안 들어온" 얇은 펌프 — a move only counts if real
+# trading value confirms it. We score each candidate by today's 거래대금 relative to that
+# stock's OWN trailing median, then drop the weakest quantile OF THE COHORT.
+#
+# Why a RELATIVE cohort drop and not an absolute "today ≥ N× median" bar: the morning batch
+# runs at 09:30 (~30min into the session), so today's Amount is a PARTIAL-day value. A fixed
+# multiple would be biased by that partial-day fraction, and choosing a different N per
+# time-of-day is exactly the tuned magic number the design forbids (dies OOS). The common
+# partial-day factor cancels in a cross-candidate RANK, so a quantile drop is partial-day
+# robust and is a capacity knob (allowed), not a predictor.
+VALUE_SPIKE_MIN_BASELINE_DAYS = 5   # complete baseline days needed to score a stock; else keep (fail-open)
+VALUE_SPIKE_DROP_QUANTILE = 0.25    # drop the bottom quartile of the cohort by relative 거래대금 spike
+VALUE_SPIKE_MIN_COHORT = 4          # a quantile is meaningless below this many scored candidates → skip the drop
+
+
+def _value_spike_ratio(df: pd.DataFrame, trade_date: str, today_amount: float):
+    """거래대금 스파이크 비율 = 오늘 거래대금 / 자기 과거(완성일) 중앙값.
+
+    Returns the ratio, or None when it cannot be built (missing Amount column, no today value,
+    or < VALUE_SPIKE_MIN_BASELINE_DAYS of baseline). None means 'unjudgeable → keep' at the
+    cohort-drop step — matching the #289 convention that a data blip never silently drops a
+    candidate. Today is excluded from the baseline by date so the spike cannot dilute its own
+    reference. The ratio is a PARTIAL-day value in the morning; only its RANK within the cohort
+    is used downstream, where the common partial-day factor cancels.
+    """
+    amount_col = "Amount" if "Amount" in df.columns else ("거래대금" if "거래대금" in df.columns else None)
+    # not np.isfinite(...) FIRST so a NaN/inf today value short-circuits to None (unjudgeable →
+    # fail-open for THIS row only). Otherwise NaN would slip past `<= 0`, return NaN, and poison
+    # np.quantile — silently disabling the gate for the whole cohort (codex P2).
+    if amount_col is None or not np.isfinite(today_amount) or today_amount <= 0:
+        return None
+
+    def _date_key(x):
+        return str(x).replace("-", "").replace("/", "").replace(" ", "")[:8]
+
+    amounts = df[amount_col].tolist()
+    keys = [_date_key(d) for d in df.index]
+    baseline = [float(a) for a, k in zip(amounts, keys) if k < trade_date and float(a) > 0]
+    if len(baseline) < VALUE_SPIKE_MIN_BASELINE_DAYS:
+        return None
+    median = float(np.median(baseline))
+    if median <= 0:
+        return None
+    return today_amount / median
+
 
 def _compute_extension_score(extension_in_adr: float) -> float:
     """#289: Map ADR-extension above MA20 to a 0~1 score.
@@ -398,7 +444,8 @@ def _compute_extension_score(extension_in_adr: float) -> float:
 
 
 def calculate_screening_signals(ticker: str, current_price: float, trade_date: str,
-                                lookback_days: int = SCREENING_SIGNAL_LOOKBACK_DAYS) -> dict:
+                                lookback_days: int = SCREENING_SIGNAL_LOOKBACK_DAYS,
+                                *, today_amount: float = 0.0) -> dict:
     """#289: Compute O'Neil-style screening signals from a single multi-week OHLCV fetch.
 
     Intentionally independent of calculate_agent_fit_metrics so the agent's 10-day
@@ -410,13 +457,17 @@ def calculate_screening_signals(ticker: str, current_price: float, trade_date: s
         - return_nd:        N-day price return % (raw multi-week relative-strength input;
                             benchmark subtraction cancels under cross-candidate normalization)
     """
-    result = {"extension_in_adr": 0.0, "extension_score": 1.0, "return_nd": 0.0}
+    result = {"extension_in_adr": 0.0, "extension_score": 1.0, "return_nd": 0.0,
+              "value_spike_ratio": None}
     if current_price <= 0:
         return result
 
     df = get_multi_day_ohlcv(ticker, trade_date, lookback_days)
     if df.empty or len(df) < 5:
         return result
+
+    # 거래대금 폭발 확인 (same OHLCV fetch; independent of the close-based signals below).
+    result["value_spike_ratio"] = _value_spike_ratio(df, trade_date, today_amount)
 
     high_col = "High" if "High" in df.columns else "고가"
     low_col = "Low" if "Low" in df.columns else "저가"
@@ -1306,14 +1357,51 @@ def select_final_tickers(triggers: dict, trade_date: str = None, use_hybrid: boo
                 if _ticker in screening_signals:
                     continue
                 _cp = _cdf.loc[_ticker, "Close"] if "Close" in _cdf.columns else 0
-                screening_signals[_ticker] = calculate_screening_signals(_ticker, float(_cp), trade_date)
+                _amt = _cdf.loc[_ticker, "Amount"] if "Amount" in _cdf.columns else 0
+                screening_signals[_ticker] = calculate_screening_signals(
+                    _ticker, float(_cp), trade_date, today_amount=float(_amt))
 
+        # 거래대금 폭발 확인 (relative cohort drop): rank candidates by today's 거래대금 vs each
+        # stock's own trailing median, then drop the weakest quantile — rejecting thin-money
+        # movers. Purely relative → robust to the 09:30 partial-day snapshot (the common factor
+        # cancels in the rank). Unjudgeable candidates (ratio None) are kept (fail-open, logged).
+        _ratios = {t: s["value_spike_ratio"] for t, s in screening_signals.items()
+                   if s.get("value_spike_ratio") is not None}
+        _unjudged = [t for t, s in screening_signals.items() if s.get("value_spike_ratio") is None]
+        if _unjudged:
+            logger.info(f"[거래대금 게이트] {len(_unjudged)}종목 판단불가(데이터부족) → 유지(fail-open): {_unjudged[:10]}")
+        if len(_ratios) >= VALUE_SPIKE_MIN_COHORT:
+            _cutoff = float(np.quantile(list(_ratios.values()), VALUE_SPIKE_DROP_QUANTILE))
+            _rejected = {t for t, r in _ratios.items() if r < _cutoff}
+            if _rejected:
+                _before = sum(len(c) for c in trigger_candidates.values())
+                for _t in sorted(_rejected, key=lambda x: _ratios[x]):
+                    logger.info(f"[거래대금 게이트] {_t} 제외 — 상대 스파이크 하위 "
+                                f"(ratio={_ratios[_t]:.2f} < cutoff {_cutoff:.2f})")
+                trigger_candidates = {
+                    name: cdf.loc[[t for t in cdf.index if t not in _rejected]]
+                    for name, cdf in trigger_candidates.items()
+                }
+                trigger_candidates = {name: cdf for name, cdf in trigger_candidates.items() if not cdf.empty}
+                _after = sum(len(c) for c in trigger_candidates.values())
+                logger.info(f"[거래대금 게이트] {len(_rejected)}종목 제외(하위 "
+                            f"{int(VALUE_SPIKE_DROP_QUANTILE * 100)}%), 후보 {_before} → {_after}")
+        else:
+            logger.info(f"[거래대금 게이트] 판단가능 후보 {len(_ratios)} < {VALUE_SPIKE_MIN_COHORT} → 상대 탈락 생략")
+
+        if not trigger_candidates:
+            logger.warning("[거래대금 게이트] 필터 후 남은 후보 없음 → 선정 없음")
+            return final_result
+
+        # #289 RS normalization over the SURVIVING candidates (post-gate).
+        _surviving = {t for cdf in trigger_candidates.values() for t in cdf.index}
         rs_score_map = {}
-        if screening_signals:
-            _returns = [s["return_nd"] for s in screening_signals.values()]
+        _sig_items = [(t, screening_signals[t]) for t in _surviving if t in screening_signals]
+        if _sig_items:
+            _returns = [s["return_nd"] for _, s in _sig_items]
             _r_min, _r_max = min(_returns), max(_returns)
             _r_range = _r_max - _r_min if _r_max > _r_min else 0.0
-            for _ticker, s in screening_signals.items():
+            for _ticker, s in _sig_items:
                 rs_score_map[_ticker] = ((s["return_nd"] - _r_min) / _r_range) if _r_range > 0 else 0.5
 
         for name, candidates_df in trigger_candidates.items():

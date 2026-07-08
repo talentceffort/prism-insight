@@ -177,5 +177,62 @@ try:
 finally:
     t.get_multi_day_ohlcv = _orig_ohlcv
 
+print("\n[Test 9] 거래대금 폭발 게이트 — relative cohort drop removes the thin-money mover")
+
+
+def _fake_ohlcv_flat_amount(ticker, end_date, days=60):
+    """Flat 거래대금 history (median = 1e9) for every ticker; today's value comes from
+    the candidate frame, so today/median ratio is driven purely by the candidate Amount."""
+    idx = pd.date_range(end="2026-05-29", periods=days)
+    close = np.linspace(100.0, 110.0, days)
+    return pd.DataFrame(
+        {"Open": close, "High": close * 1.01, "Low": close * 0.99, "Close": close,
+         "Volume": [1_000_000] * days, "Amount": [1e9] * days}, index=idx)
+
+
+_orig_ohlcv2 = t.get_multi_day_ohlcv
+try:
+    t.get_multi_day_ohlcv = _fake_ohlcv_flat_amount
+    # 5-candidate cohort. THIN has the HIGHEST composite_score but its today 거래대금 (0.2e9) is
+    # far below its own history median (1e9) → bottom of the relative-spike cohort → must be
+    # dropped BEFORE scoring, proving the gate overrides a high mechanical score.
+    gdf = pd.DataFrame(
+        {"Close":           [110.0, 110.0, 110.0, 110.0, 110.0],
+         "composite_score": [0.5,   0.5,   0.5,   0.5,   0.9],
+         "Amount":          [10e9,  8e9,   6e9,   4e9,   0.2e9],
+         "Volume":          [1_000_000] * 5,
+         "stock_name":      ["A", "B", "C", "D", "THIN"]},
+        index=["A", "B", "C", "D", "THIN"])
+    gres = t.select_final_tickers(
+        {"일중 상승률 상위주": gdf}, trade_date="20260529", use_hybrid=True,
+        macro_context={"market_regime": "sideways"})
+    gsel = {tk for _n, rdf in gres.items() for tk in rdf.index}
+    check("THIN dropped by 거래대금 gate despite top composite_score", "THIN" not in gsel)
+    check("at least one strong-value candidate selected", len(gsel) >= 1)
+    check("survivors are all strong-value names", gsel.issubset({"A", "B", "C", "D"}))
+
+    # NaN robustness: a non-finite today value is unjudgeable → None (fail-open for that row),
+    # and must NOT poison the cohort quantile and disable the gate for everyone (codex P2).
+    _flat = _fake_ohlcv_flat_amount("X", "20260529")
+    check("_value_spike_ratio → None for NaN today value",
+          t._value_spike_ratio(_flat, "20260529", float("nan")) is None)
+    check("_value_spike_ratio → None for inf today value",
+          t._value_spike_ratio(_flat, "20260529", float("inf")) is None)
+    ndf = pd.DataFrame(
+        {"Close":           [110.0] * 5,
+         "composite_score": [0.5, 0.5, 0.5, 0.9, 0.5],
+         "Amount":          [10e9, 8e9, 6e9, 0.2e9, np.nan],  # THINLOW thin (top composite), NANV unjudgeable
+         "Volume":          [1_000_000] * 5,
+         "stock_name":      ["A", "B", "C", "THINLOW", "NANV"]},
+        index=["A", "B", "C", "THINLOW", "NANV"])
+    nres = t.select_final_tickers(
+        {"일중 상승률 상위주": ndf}, trade_date="20260529", use_hybrid=True,
+        macro_context={"market_regime": "sideways"})
+    nsel = {tk for _n, rdf in nres.items() for tk in rdf.index}
+    # With the bug, the NaN disables the gate → THINLOW (top composite) survives. Fixed → dropped.
+    check("thin name still dropped when a NaN is present (gate not disabled)", "THINLOW" not in nsel)
+finally:
+    t.get_multi_day_ohlcv = _orig_ohlcv2
+
 print(f"\n===== RESULT: {passed} passed, {failed} failed =====")
 sys.exit(1 if failed else 0)
