@@ -107,7 +107,7 @@ class TelegramSummaryGenerator:
         """
         Extract ticker code, company name, date etc. from filename
         """
-        pattern = r'(\w+)_(.+)_(\d{8})_.*\.pdf'
+        pattern = r'(\w+)_(.+)_(\d{8})_.*\.(?:pdf|md)'
         match = re.match(pattern, filename)
 
         if match:
@@ -399,9 +399,9 @@ class TelegramSummaryGenerator:
 
             logger.info(f"Processing: {filename} - {metadata['stock_name']}({metadata['stock_code']})")
 
-            # Read report content
-            from pdf_converter import pdf_to_markdown_text
-            report_content = pdf_to_markdown_text(report_pdf_path)
+            # Read report content — prefer the original markdown over PDF re-extraction.
+            from pdf_converter import read_report_text
+            report_content = read_report_text(report_pdf_path)
 
             # Determine trigger type and mode
             trigger_type, trigger_mode = self.determine_trigger_type(

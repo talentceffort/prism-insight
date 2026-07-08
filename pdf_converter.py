@@ -1444,6 +1444,39 @@ def pdf_to_markdown_text(pdf_path):
     return convert_to_markdown(text)
 
 
+def _strip_base64_images(text: str) -> str:
+    """Remove inline base64 chart images (HTML ``<img src="data:image/...;base64,...">`` and
+    markdown ``![...](data:image/...)``). They are noise to a text LLM and each blob can be
+    hundreds of KB — the previous PDF text-extraction path dropped images anyway, so this keeps
+    the summary/decision prompts small and image-free."""
+    import re
+    text = re.sub(r'<img\b[^>]*?base64[^>]*?>', '[chart omitted]', text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r'!\[[^\]]*\]\(\s*data:image/[^)]*\)', '[chart omitted]', text, flags=re.IGNORECASE)
+    return text
+
+
+def read_report_text(report_path) -> str:
+    """Return an analysis report as text, preferring the ORIGINAL markdown over a lossy PDF
+    re-extraction. Downstream LLM steps (Telegram summary, buy/sell decision) must read the
+    clean markdown the agents wrote — not text scraped back out of the rendered PDF (which
+    mangles tables/formatting and degrades the decision). Inline base64 chart images are
+    stripped (they are useless to a text LLM and the old PDF path omitted them anyway).
+
+      1) a .md path            -> read directly
+      2) a .pdf path           -> read the sibling reports/<stem>.md (same stem as the pdf)
+      3) neither available     -> fall back to extracting the PDF (e.g. an on-demand /report
+                                  cache where only the PDF was kept)
+    """
+    from pathlib import Path
+    p = Path(report_path)
+    if p.suffix.lower() == ".md" and p.exists():
+        return _strip_base64_images(p.read_text(encoding="utf-8"))
+    md_sibling = Path("reports") / f"{p.stem}.md"
+    if md_sibling.exists():
+        return _strip_base64_images(md_sibling.read_text(encoding="utf-8"))
+    return pdf_to_markdown_text(str(report_path))
+
+
 if __name__ == "__main__":
     # Test code
     import sys
