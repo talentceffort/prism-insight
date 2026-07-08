@@ -338,9 +338,10 @@ def save_pdf_report(stock_code: str, company_name: str, md_path: Path) -> Path:
     """
     from pdf_converter import markdown_to_pdf
 
-    reference_date = datetime.now().strftime("%Y%m%d")
-    pdf_filename = f"{stock_code}_{company_name}_{reference_date}_analysis.pdf"
-    pdf_path = PDF_REPORTS_DIR / pdf_filename
+    # Name the PDF after the SOURCE markdown's stem so the two always share a stem
+    # ({code}_{name}_{date}_analysis). Recomputing datetime.now() here would mis-name a PDF
+    # rendered for a still-cached previous-day report, causing /report to re-render every hit.
+    pdf_path = PDF_REPORTS_DIR / f"{Path(md_path).stem}.pdf"
 
     try:
         markdown_to_pdf(str(md_path), str(pdf_path), 'playwright', add_theme=True)
