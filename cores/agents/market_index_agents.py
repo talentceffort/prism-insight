@@ -291,25 +291,42 @@ def create_market_index_analysis_agent(reference_date, max_years_ago, max_years,
                         ##분석일: {reference_date}(YYYYMMDD 형식)
                         """
 
+    from cores.data_prefetch import is_prefetch_available
+    _prefetch_owner = is_prefetch_available()
+
+    # The instruction's data-collection section (per language). When prefetch is the KRX owner
+    # we detach the live kospi_kosdaq server (KRX = one session per account → multi-process
+    # login war), so the prompt MUST NOT keep telling the agent to call that tool — replace it
+    # with the prefetched block, or (if index data is incomplete this run) a degrade note.
+    _en_tool = f"## Data to Collect\n                        1. KOSPI Index Data: Use tool call(kospi_kosdaq-get_index_ohlcv tool) to collect data from {max_years_ago} to {reference_date} (ticker: \"1001\", collection period (years): {max_years}, daily basis)\n                        2. KOSDAQ Index Data: Use tool call(kospi_kosdaq-get_index_ohlcv tool) to collect data from {max_years_ago} to {reference_date} (ticker: \"2001\", collection period (years): {max_years}, daily basis)"
+    _ko_tool = f"## 수집해야 할 데이터\n                        1. KOSPI 지수 데이터: tool call(kospi_kosdaq-get_index_ohlcv tool)을 사용하여 {max_years_ago}~{reference_date} 기간의 데이터 수집 (ticker: \"1001\", 수집 기간(년) : {max_years}, 일봉 기준)\n                        2. KOSDAQ 지수 데이터: tool call(kospi_kosdaq-get_index_ohlcv tool)을 사용하여 {max_years_ago}~{reference_date} 기간의 데이터 수집 (ticker: \"2001\", 수집 기간(년) : {max_years}, 일봉 기준)"
+
     # Inject prefetched index data if available
     if prefetched_kospi and prefetched_kosdaq:
         prefetched_index_block = f"{prefetched_kospi}\n\n{prefetched_kosdaq}"
         if language == "en":
-            instruction = instruction.replace(
-                f"## Data to Collect\n                        1. KOSPI Index Data: Use tool call(kospi_kosdaq-get_index_ohlcv tool) to collect data from {max_years_ago} to {reference_date} (ticker: \"1001\", collection period (years): {max_years}, daily basis)\n                        2. KOSDAQ Index Data: Use tool call(kospi_kosdaq-get_index_ohlcv tool) to collect data from {max_years_ago} to {reference_date} (ticker: \"2001\", collection period (years): {max_years}, daily basis)",
-                f"## Pre-collected Data (Market Indices)\nThe following KOSPI and KOSDAQ data has been pre-collected. Use this data directly for your analysis - DO NOT make tool calls for index data.\n\n{prefetched_index_block}"
-            )
+            instruction = instruction.replace(_en_tool,
+                f"## Pre-collected Data (Market Indices)\nThe following KOSPI and KOSDAQ data has been pre-collected. Use this data directly for your analysis - DO NOT make tool calls for index data.\n\n{prefetched_index_block}")
         else:
-            instruction = instruction.replace(
-                f"## 수집해야 할 데이터\n                        1. KOSPI 지수 데이터: tool call(kospi_kosdaq-get_index_ohlcv tool)을 사용하여 {max_years_ago}~{reference_date} 기간의 데이터 수집 (ticker: \"1001\", 수집 기간(년) : {max_years}, 일봉 기준)\n                        2. KOSDAQ 지수 데이터: tool call(kospi_kosdaq-get_index_ohlcv tool)을 사용하여 {max_years_ago}~{reference_date} 기간의 데이터 수집 (ticker: \"2001\", 수집 기간(년) : {max_years}, 일봉 기준)",
-                f"## 사전 수집된 데이터 (시장 지수)\n다음 KOSPI, KOSDAQ 데이터가 사전 수집되었습니다. 이 데이터를 분석에 직접 사용하세요 - 지수 데이터를 위한 도구 호출을 하지 마세요.\n\n{prefetched_index_block}"
-            )
-        # Update precautions
+            instruction = instruction.replace(_ko_tool,
+                f"## 사전 수집된 데이터 (시장 지수)\n다음 KOSPI, KOSDAQ 데이터가 사전 수집되었습니다. 이 데이터를 분석에 직접 사용하세요 - 지수 데이터를 위한 도구 호출을 하지 마세요.\n\n{prefetched_index_block}")
         instruction = instruction.replace("- 반드시 tool call을 통해 실제 데이터를 수집해야 합니다", "- 사전 수집된 데이터와 perplexity 검색 결과를 기반으로 분석합니다")
         instruction = instruction.replace("- You must make a tool call to collect actual data", "- Analyze based on the pre-collected data and perplexity search results")
+    elif _prefetch_owner:
+        # Prefetch owns KRX but index data is incomplete this run → no live tool will be
+        # attached, so strip the collect-via-tool instruction and degrade to perplexity/macro.
+        if language == "en":
+            instruction = instruction.replace(_en_tool,
+                "## Index Data Note\nLive index OHLCV is unavailable this run. Base the market read on the perplexity macro/news search results and clearly note that index price/technical detail is limited.")
+        else:
+            instruction = instruction.replace(_ko_tool,
+                "## 지수 데이터 참고\n이번 실행에서 실시간 지수 OHLCV를 수집할 수 없습니다. perplexity 거시/뉴스 검색 결과를 근거로 시장을 판단하고, 지수 가격·기술 세부는 제한적임을 명시하세요.")
+        instruction = instruction.replace("- 반드시 tool call을 통해 실제 데이터를 수집해야 합니다", "- perplexity 검색 결과 기반으로 분석하며, 지수 데이터 제한을 명시합니다")
+        instruction = instruction.replace("- You must make a tool call to collect actual data", "- Analyze based on perplexity search results and note the index-data limitation")
 
-    # When index data is prefetched, only need perplexity for market news
-    if prefetched_kospi and prefetched_kosdaq:
+    # KRX single session: attach the live kospi_kosdaq server ONLY when prefetch is not the
+    # owner (module structurally absent) — then it is the sole consumer, no war.
+    if _prefetch_owner:
         server_list = ["perplexity"]
     else:
         server_list = ["kospi_kosdaq", "perplexity"]

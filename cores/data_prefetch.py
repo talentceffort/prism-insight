@@ -62,6 +62,20 @@ def _get_mcp_server_module():
         return None
 
 
+def is_prefetch_available() -> bool:
+    """True if the kospi_kosdaq_stock_server module can be imported — i.e. prefetch is the
+    KRX data owner for this process.
+
+    KRX allows exactly ONE session per account. When prefetch is available, analysis agents
+    MUST NOT open their own live kospi_kosdaq MCP server: a second consumer restarts the KRX
+    login every time it acts, invalidating the prefetch session and triggering a multi-process
+    login war (the cause of the analysis stalls/crashes). When prefetch is NOT available
+    (module missing), agents fall back to the live server as the SOLE consumer — still one
+    session, no war.
+    """
+    return _get_mcp_server_module() is not None
+
+
 def prefetch_stock_ohlcv(company_code: str, start_date: str, end_date: str) -> str:
     """Prefetch stock OHLCV data via kospi_kosdaq MCP server library.
 
