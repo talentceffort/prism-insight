@@ -131,9 +131,28 @@ translate_telegram_message = _translator_module.translate_telegram_message
 _utils_module = _import_from_main_cores("cores_utils", "cores/utils.py")
 parse_llm_json = _utils_module.parse_llm_json
 
+
+def _import_from_prism_us(module_name: str, relative_path: str):
+    """Load a module by file path from the prism-us tree.
+
+    The US trading-agent factories live in prism-us/cores/agents/trading_agents.py, but a bare
+    `from cores.agents.trading_agents import create_us_*` resolves `cores` to the ROOT cores
+    package (which has no create_us_* symbols) → ImportError. Loading the prism-us file
+    explicitly dodges that prism-us/cores namespace collision (v2.9.0 importlib pattern).
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(module_name, _prism_us_dir / relative_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_us_trading_module = _import_from_prism_us("us_trading_agents", "cores/agents/trading_agents.py")
+create_us_trading_scenario_agent = _us_trading_module.create_us_trading_scenario_agent
+create_us_sell_decision_agent = _us_trading_module.create_us_sell_decision_agent
+
 try:
-    # First try direct import from prism-us directory
-    from cores.agents.trading_agents import create_us_trading_scenario_agent, create_us_sell_decision_agent
+    # tracking.* live in the main-project tracking/ (root package), not prism-us
     from tracking.db_schema import (
         create_us_tables,
         create_us_indexes,
@@ -156,7 +175,6 @@ except ImportError as e:
     _prism_us_fallback = Path(__file__).parent
     if str(_prism_us_fallback) not in sys.path:
         sys.path.insert(0, str(_prism_us_fallback))
-    from cores.agents.trading_agents import create_us_trading_scenario_agent, create_us_sell_decision_agent
     from tracking.db_schema import (
         create_us_tables,
         create_us_indexes,

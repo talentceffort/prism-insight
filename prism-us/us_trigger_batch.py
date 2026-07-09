@@ -1038,8 +1038,9 @@ def select_final_tickers(triggers: dict, trade_date: str = None, use_hybrid: boo
     selected_tickers = set()
     score_column = "FinalScore" if use_hybrid and trade_date else "CompositeScore"
 
-    # Fixed max_selections=3 regardless of regime (user preference for consistent selection count)
-    max_selections = 3
+    # Fixed max_selections regardless of regime (user preference for consistent selection count).
+    # 10 = analyze the full filtered set per run (mirrors KR); Phase 2/3 fill up to this cap.
+    max_selections = 10
 
     # Build sector map once for all candidate tickers (used by both top-down and logging)
     candidate_tickers = []
