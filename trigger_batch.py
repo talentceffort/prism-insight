@@ -1449,7 +1449,7 @@ def select_final_tickers(triggers: dict, trade_date: str = None, use_hybrid: boo
     # 3. Final stock selection (hybrid top-down + bottom-up)
     selected_tickers = set()
     score_column = "final_score" if use_hybrid and trade_date else "composite_score"
-    max_selections = 3
+    max_selections = 10
 
     # Determine regime and slot allocation
     market_regime = macro_context.get("market_regime", "sideways") if macro_context else "sideways"
