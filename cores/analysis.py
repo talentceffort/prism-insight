@@ -62,17 +62,54 @@ async def analyze_stock(company_code: str = "000660", company_name: str = "SK하
         # 3. Define sections to analyze
         base_sections = ["price_volume_analysis", "investor_trading_analysis", "company_status", "company_overview", "news_analysis", "market_index_analysis"]
 
-        # 4. Prefetch data to reduce MCP tool call overhead
-        from cores.data_prefetch import prefetch_kr_analysis_data
-        try:
-            from datetime import timedelta
-            ref_date_obj = datetime.strptime(reference_date, "%Y%m%d")
-            max_years_calc = 1
-            max_years_ago_calc = (ref_date_obj - timedelta(days=365*max_years_calc)).strftime("%Y%m%d")
-            prefetched = prefetch_kr_analysis_data(company_code, reference_date, max_years_ago_calc)
-        except Exception as e:
-            logger.warning(f"Data prefetch failed, falling back to MCP: {e}")
-            prefetched = {}
+        # 4. Prefetch data — the SOLE KRX consumer (KRX allows ONE session per account).
+        #    is_prefetch_available() means the module is INSTALLED (prefetch OWNS KRX); it does
+        #    NOT mean this fetch succeeded. So a transient KRX/network failure must be recovered
+        #    by retrying THROUGH this one consumer — never by opening a second live session
+        #    (that restarts the multi-process login war). Only skip after retries are exhausted.
+        from cores.data_prefetch import prefetch_kr_analysis_data, is_prefetch_available
+        from datetime import timedelta
+        import asyncio
+        ref_date_obj = datetime.strptime(reference_date, "%Y%m%d")
+        max_years_calc = 1
+        max_years_ago_calc = (ref_date_obj - timedelta(days=365*max_years_calc)).strftime("%Y%m%d")
+
+        prefetch_owner = is_prefetch_available()
+        prefetched = {}
+        _PREFETCH_ATTEMPTS = 3
+        for _attempt in range(1, _PREFETCH_ATTEMPTS + 1):
+            try:
+                _got = prefetch_kr_analysis_data(company_code, reference_date, max_years_ago_calc)
+            except Exception as e:
+                logger.warning(f"Data prefetch raised for {company_code} (attempt {_attempt}/{_PREFETCH_ATTEMPTS}): {e}")
+                _got = {}
+            # Merge non-empty keys across attempts: a series that succeeded on an earlier attempt
+            # must not be discarded because a later attempt failed on a different series.
+            for _k, _v in _got.items():
+                if _v:
+                    prefetched[_k] = _v
+            # Stop once core per-stock series are present, or when prefetch isn't the owner
+            # (module absent → retrying can't help; agents will use the live server instead).
+            if not prefetch_owner or (prefetched.get("stock_ohlcv") and prefetched.get("trading_volume")):
+                break
+            if _attempt < _PREFETCH_ATTEMPTS:
+                logger.info(f"Prefetch incomplete for {company_code} (got {list(prefetched.keys())}); "
+                            f"retrying via the single KRX consumer...")
+                await asyncio.sleep(5)
+
+        # Owner + core data still missing after retries = a genuine data gap (e.g. a fresh
+        # listing), not the old login war. The price/investor agents run without a live
+        # kospi_kosdaq tool, so a data-less run would face an unfulfillable prompt — skip the
+        # stock (loud) rather than fabricate a report or open a competing live-KRX session.
+        # (Index data is separate — the market agent degrades on its own.)
+        if prefetch_owner and not (prefetched.get("stock_ohlcv") and prefetched.get("trading_volume")):
+            logger.error(f"Prefetch missing core KR data for {company_name}({company_code}) after "
+                         f"{_PREFETCH_ATTEMPTS} attempts (got {list(prefetched.keys())}) — skipping "
+                         f"analysis (no fabricated report, no live-KRX fallback).")
+            return ""
+        if not prefetch_owner:
+            logger.warning("Prefetch module unavailable — analysis agents will use the live "
+                           "kospi_kosdaq server as the SOLE KRX consumer (no prefetch, no war).")
 
         # 5. Get agents (with prefetched data)
         agents = get_agent_directory(company_name, company_code, reference_date, base_sections, language, prefetched_data=prefetched)

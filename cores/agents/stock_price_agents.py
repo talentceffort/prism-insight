@@ -156,6 +156,12 @@ def create_price_volume_analysis_agent(company_name, company_code, reference_dat
         instruction = instruction.replace("- 반드시 tool call을 해야 합니다", "- 사전 수집된 데이터를 기반으로 분석합니다")
         instruction = instruction.replace("- You must make a tool call", "- Analyze based on the pre-collected data provided above")
 
+    # Gate the live KRX tool on THIS agent's data: has data → no tool (use the prefetched
+    # block); no data → the live tool. Storm-safety is enforced upstream: analyze_stock SKIPS
+    # any stock whose core KRX data didn't prefetch, so when prefetch OWNS KRX this agent is
+    # only ever built WITH data → it never opens a competing live session (KRX = one session
+    # per account). When prefetch is unavailable (module absent), the live tool is the SOLE
+    # consumer. Either way exactly one KRX session.
     return Agent(
         name="price_volume_analysis_agent",
         instruction=instruction,
@@ -309,6 +315,9 @@ def create_investor_trading_analysis_agent(company_name, company_code, reference
         instruction = instruction.replace("- 반드시 tool call을 해야 합니다", "- 사전 수집된 데이터를 기반으로 분석합니다")
         instruction = instruction.replace("- You must make a tool call", "- Analyze based on the pre-collected data provided above")
 
+    # See price_volume agent: gate on THIS agent's data (analyze_stock skips no-data stocks
+    # upstream, so with prefetch as KRX owner this is only built WITH data → no competing
+    # session; module absent → the live tool is the sole consumer). Either way one KRX session.
     return Agent(
         name="investor_trading_analysis_agent",
         instruction=instruction,
