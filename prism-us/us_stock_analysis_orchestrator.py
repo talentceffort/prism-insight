@@ -1115,20 +1115,22 @@ class USStockAnalysisOrchestrator:
             except Exception as _e:
                 logger.warning(f"Archive ingest hook skipped: {_e}")
 
-            # 4. PDF conversion
-            pdf_paths = await self.convert_to_pdf(report_paths)
+            # 4. PDF conversion — removed from the scheduled US pipeline (user: US PDFs not
+            # needed). Summary + buy/sell decision read the ORIGINAL markdown directly
+            # (read_report_text), and no PDF is attached to Telegram. PDF rendering remains
+            # available for the on-demand /us_report bot flow only.
 
             # 4-5. Generate and send telegram messages
             if self.telegram_config.use_telegram:
                 logger.info("Telegram enabled - proceeding with US message generation and transmission")
 
-                message_paths = await self.generate_telegram_messages(pdf_paths, language)
-                await self.send_telegram_messages(message_paths, pdf_paths, report_paths)
+                message_paths = await self.generate_telegram_messages(report_paths, language)
+                await self.send_telegram_messages(message_paths, [], report_paths)
             else:
                 logger.info("Telegram disabled - skipping US message generation and transmission")
 
             # 6. Tracking system batch (runs concurrently with broadcast I/O tasks via async)
-            if pdf_paths:
+            if report_paths:
                 try:
                     logger.info("Starting US stock tracking system batch execution")
 
@@ -1155,8 +1157,10 @@ class USStockAnalysisOrchestrator:
                         trigger_results_file = str(PRISM_US_DIR / f"trigger_results_us_{mode}_{effective_date}.json")
 
                         # US uses fixed GICS sectors (fallback in trading_agents.py)
+                        # Pass markdown report paths — the decision reads the original
+                        # markdown via read_report_text (no PDF in the scheduled pipeline).
                         tracking_success = await tracking_agent.run(
-                            pdf_paths, chat_id, language,
+                            report_paths, chat_id, language,
                             telegram_config=self.telegram_config,
                             trigger_results_file=trigger_results_file
                         )
