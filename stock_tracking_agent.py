@@ -1669,7 +1669,7 @@ class StockTrackingAgent:
 
             # 3. Trading history statistics
             message += "🔸 매매 이력 통계\n"
-            message += f"- 총 거래: {total_trades}건\n"
+            message += f"- 청산 완료 거래: {total_trades}건\n"
             message += f"- 수익 거래: {successful_trades}건\n"
             message += f"- 손실 거래: {total_trades - successful_trades}건\n"
 
