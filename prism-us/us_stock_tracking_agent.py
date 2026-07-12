@@ -2592,10 +2592,10 @@ Use yahoo_finance and sqlite tools to check latest data, then decide whether to 
             message += f"- 누적 수익률: {total_profit:.2f}%\n\n"
 
             # 4. Enhanced Disclaimer
-            message += "📝 Important Notice:\n"
-            message += "- This report is an AI-based simulation result and is not related to actual trading.\n"
-            message += "- This information is for reference only. Investment decisions and responsibilities lie solely with the investor.\n"
-            message += "- This channel is not a trading room and does not recommend buying/selling specific stocks."
+            message += "📝 안내사항:\n"
+            message += "- 이 보고서는 AI 기반 시뮬레이션 결과이며, 실제 매매와 무관합니다.\n"
+            message += "- 본 정보는 단순 참고용이며, 투자 결정과 책임은 전적으로 투자자에게 있습니다.\n"
+            message += "- 이 채널은 리딩방이 아니며, 특정 종목의 매수/매도를 권유하지 않습니다."
 
             return message
 
