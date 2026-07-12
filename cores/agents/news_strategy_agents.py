@@ -244,8 +244,24 @@ def create_news_analysis_agent(company_name, company_code, reference_date, langu
                         분석일: {reference_date}(YYYYMMDD 형식)
                         """
 
+    # Live-search tools are DISABLED: the perplexity/firecrawl API keys are placeholders, so
+    # every call 401s — the agent burned minutes per stock retrying dead tools (2026-07-10 the
+    # run died mid perplexity_ask retry). No servers are attached; the prepended note overrides
+    # the collection steps so the model states the limitation instead of flailing. Restore the
+    # servers (and drop the note) when a real search path lands (web_search proxy support or an
+    # actual perplexity/firecrawl key).
+    instruction = (
+        "## 도구 사용 불가 안내 (Tool Availability Override)\n"
+        "이번 실행에는 실시간 검색 도구(firecrawl/perplexity)가 제공되지 않습니다. 아래 지침의 "
+        "뉴스 수집(STEP) 단계는 수행할 수 없으므로 건너뛰세요. 보고서에는 '실시간 뉴스 검색이 "
+        "불가하여 개별 기사 확인이 제한됩니다'를 명시하고, 제공된 데이터와 일반적인 업종 맥락 "
+        "수준에서만 보수적으로 작성하세요. 확인되지 않은 구체적 뉴스·수치·날짜를 절대 만들어내지 "
+        "마세요.\n"
+        "(Live search tools are unavailable this run: skip the collection steps, state the "
+        "limitation explicitly, and do not fabricate specific news items.)\n\n"
+    ) + instruction
     return Agent(
         name="news_analysis_agent",
         instruction=instruction,
-        server_names=["perplexity", "firecrawl"]
+        server_names=[]
     )

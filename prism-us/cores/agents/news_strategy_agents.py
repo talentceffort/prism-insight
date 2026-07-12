@@ -240,8 +240,19 @@ Company: {company_name} ({ticker})
 Analysis Date: {reference_date}(YYYYMMDD format)
 """
 
+    # Live-search tools are DISABLED (placeholder API keys → every call 401s; mirrors the KR
+    # news agent). Restore the servers (and drop the note) when a real search path lands
+    # (web_search proxy support, yfinance-news prefetch, or an actual key).
+    instruction = (
+        "## Tool Availability Override\n"
+        "Live search tools (firecrawl/perplexity) are NOT available this run. Skip the news "
+        "collection steps below. State explicitly in the report that live news search is "
+        "unavailable and individual articles could not be verified, then write conservatively "
+        "from the provided data and general sector context only. NEVER fabricate specific news "
+        "items, figures, or dates.\n\n"
+    ) + instruction
     return Agent(
         name="us_news_analysis_agent",
         instruction=instruction,
-        server_names=["perplexity", "firecrawl"]
+        server_names=[]
     )

@@ -56,7 +56,7 @@ def test_news_agent_receives_prefetched_social_sentiment(sample_reference_date):
     assert "do not make extra tool calls for social sentiment" in agent.instruction
     assert "Social sentiment alignment" in agent.instruction
     assert agent.instruction.index("Structured Social Sentiment Snapshot") < agent.instruction.index("## Output Format")
-    assert agent.server_names == ["perplexity", "firecrawl"]
+    assert agent.server_names == []  # live-search servers detached (placeholder keys; see news agent)
 
 
 def _import_us_analysis_with_stubbed_mcp_agent(monkeypatch):

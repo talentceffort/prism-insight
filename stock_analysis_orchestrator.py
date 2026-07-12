@@ -1117,16 +1117,19 @@ class StockAnalysisOrchestrator:
             _insight_images_on = os.environ.get("PRISM_FEATURE_INSIGHT_IMAGE", "").strip().lower() in ("1", "true", "yes", "on")
             pdf_paths = await self.convert_to_pdf(report_paths) if _insight_images_on else []
 
-            # 4-5. Generate and send telegram messages (only when telegram is enabled)
+            # 4-5. Telegram summaries are generated and SENT INCREMENTALLY per report inside
+            # generate_reports (see there for why). Only the default-off insight-image
+            # broadcast still needs the batch PDF set rendered above.
             if self.telegram_config.use_telegram:
-                logger.info("Telegram enabled - proceeding with message generation and transmission steps")
-
-                # 4. Generate telegram messages — from the original markdown reports
-                # (read_report_text prefers the .md, so no PDF is required here).
-                message_paths = await self.generate_telegram_messages(report_paths, language)
-
-                # 5. Send telegram messages and PDFs
-                await self.send_telegram_messages(message_paths, pdf_paths, report_paths)
+                logger.info("Telegram summaries were sent incrementally per report")
+                if _insight_images_on and pdf_paths:
+                    try:
+                        from telegram_bot_agent import TelegramBotAgent
+                        from cores.llm.features.insight_broadcast import broadcast_insight_images
+                        await broadcast_insight_images(
+                            TelegramBotAgent(), self.telegram_config.channel_id, pdf_paths, market=None)
+                    except Exception as e:
+                        logger.warning(f"[INSIGHT_IMAGE] KR broadcast skipped: {e}")
             else:
                 logger.info("Telegram disabled - skipping message generation and transmission steps")
 
@@ -1272,6 +1275,19 @@ class StockAnalysisOrchestrator:
                         f.write(report)
                     logger.info(f"[{idx}/{len(tickers)}] Report generation complete: {company_name}({ticker}) - {len(report)} characters")
                     successful_reports.append(output_file)
+
+                    # Send THIS report's summary immediately (incremental). A mid-run crash
+                    # (KRX login war, OOM) must not hold every completed analysis hostage —
+                    # 2026-07-10: run died at stock 2/10 and the one finished report was never
+                    # alerted because summaries were batched after all N stocks. Send failures
+                    # are non-fatal: the analysis loop continues.
+                    if self.telegram_config.use_telegram:
+                        try:
+                            msg_paths = await self.generate_telegram_messages([output_file], language)
+                            await self.send_telegram_messages(msg_paths, [], [output_file])
+                        except Exception as send_err:
+                            logger.error(f"[{idx}/{len(tickers)}] Incremental alert failed "
+                                         f"(analysis continues): {send_err}")
                 else:
                     logger.error(f"[{idx}/{len(tickers)}] Report generation failed: {company_name}({ticker}) - empty content")
 
