@@ -497,6 +497,16 @@ class USStockAnalysisOrchestrator:
                         f.write(report)
                     logger.info(f"[{idx}/{len(tickers)}] Report generation complete: {company_name}({ticker}) - {len(report)} characters")
                     successful_reports.append(output_file)
+
+                    # Send THIS report's summary immediately (incremental) — mirrors KR: a
+                    # mid-run crash must not hold completed analyses hostage. Non-fatal.
+                    if self.telegram_config.use_telegram:
+                        try:
+                            msg_paths = await self.generate_telegram_messages([output_file], language)
+                            await self.send_telegram_messages(msg_paths, [], [output_file])
+                        except Exception as send_err:
+                            logger.error(f"[{idx}/{len(tickers)}] Incremental alert failed "
+                                         f"(analysis continues): {send_err}")
                 else:
                     logger.error(f"[{idx}/{len(tickers)}] Report generation failed: {company_name}({ticker}) - empty content")
 
@@ -1120,12 +1130,11 @@ class USStockAnalysisOrchestrator:
             # (read_report_text), and no PDF is attached to Telegram. PDF rendering remains
             # available for the on-demand /us_report bot flow only.
 
-            # 4-5. Generate and send telegram messages
+            # 4-5. Telegram summaries are generated and SENT INCREMENTALLY per report inside
+            # generate_reports (mirrors KR — a mid-run crash must not hold every completed
+            # analysis hostage). No batch send remains here.
             if self.telegram_config.use_telegram:
-                logger.info("Telegram enabled - proceeding with US message generation and transmission")
-
-                message_paths = await self.generate_telegram_messages(report_paths, language)
-                await self.send_telegram_messages(message_paths, [], report_paths)
+                logger.info("Telegram summaries were sent incrementally per report")
             else:
                 logger.info("Telegram disabled - skipping US message generation and transmission")
 
